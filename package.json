@@ -1,0 +1,14 @@
+{
+  "name": "palavra",
+  "private": true,
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "start": "npm run build -w web && npm run start -w server",
+    "build": "npm run build -w web",
+    "build:win": "node scripts/build-windows.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
