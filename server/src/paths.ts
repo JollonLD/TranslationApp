@@ -18,6 +18,16 @@ export function resourceDir() {
   return cwd;
 }
 
+export function useResourceCwd() {
+  const root = resourceDir();
+  try {
+    process.chdir(root);
+  } catch {
+    /* ignore */
+  }
+  return root;
+}
+
 export function webDistDir() {
   return path.join(resourceDir(), "web", "dist");
 }

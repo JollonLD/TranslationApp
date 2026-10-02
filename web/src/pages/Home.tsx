@@ -19,12 +19,11 @@ export function Home() {
         <div className="hero-copy">
           <span className="brand">
             <Flame className="brand-mark" />
-            Palavra
+            Chiesa Il Faro
           </span>
           <h1>The voice of the service, on your phone.</h1>
           <p>
-            Scan the booth QR. The translation arrives live — no app to install,
-            just the browser.
+            Scan the booth QR, choose your language, and read the service live.
           </p>
           <div className="cta-row">
             <Link className="btn" to="/como-usar">

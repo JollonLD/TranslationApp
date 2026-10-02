@@ -79,7 +79,10 @@ export function pushCaption(space: Space, caption: Caption) {
   if (caption.isFinal) {
     const last = space.captions.at(-1);
     if (last && last.original === caption.original) {
-      space.captions[space.captions.length - 1] = caption;
+      space.captions[space.captions.length - 1] = {
+        ...caption,
+        translations: { ...last.translations, ...caption.translations },
+      };
     } else {
       space.captions.push(caption);
     }

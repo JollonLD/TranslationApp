@@ -24,7 +24,6 @@ export function Space() {
   const [lanIp, setLanIp] = useState("");
   const [copied, setCopied] = useState(false);
   const [sourceLang, setSourceLang] = useState<LanguageCode>("pt");
-  const [targetLang, setTargetLang] = useState<LanguageCode>("en");
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [partial, setPartial] = useState<Caption | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -46,7 +45,7 @@ export function Space() {
 
     socket.emit(
       "space:create",
-      { sourceLang, targetLang },
+      { sourceLang },
       (result: {
         ok: boolean;
         space?: SpaceState;
@@ -130,9 +129,8 @@ export function Space() {
     getSocket().emit("space:languages", {
       code: space.code,
       sourceLang,
-      targetLang,
     });
-  }, [sourceLang, targetLang, space?.code]);
+  }, [sourceLang, space?.code]);
 
   useEffect(() => {
     if (!space || !speech.listening) return;
@@ -177,7 +175,7 @@ export function Space() {
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
           <span className="brand">
             <Flame className="brand-mark" />
-            Palavra
+            Chiesa Il Faro
           </span>
           {!skipIntro ? (
             <Link className="btn btn-ghost" to="/como-usar">
@@ -192,32 +190,23 @@ export function Space() {
             <div className="status" style={{ marginTop: 12 }}>
               <span className={`dot ${speech.listening ? "live" : ""}`} />
               {speech.listening ? "Listening to the mixer" : "Ready to listen"}
-              {` · ${LANGUAGE_LABELS[sourceLang]} → ${LANGUAGE_LABELS[targetLang]}`}
+              {` · voice in ${LANGUAGE_LABELS[sourceLang]}`}
               {space ? ` · ${Math.max(space.listenerCount, 0)} listening` : ""}
             </div>
 
             <TranscriptFeed
               captions={captions}
               partial={partial}
+              language={sourceLang}
               showOriginal
-              emptyText="When the service starts, the translation will appear here and keep growing."
+              emptyText="When the service starts, the spoken words will appear here and keep growing."
             />
 
             <div className="lang-row">
               <select
                 className="select"
                 value={sourceLang}
-                onChange={(event) => {
-                  const next = event.target.value as LanguageCode;
-                  setSourceLang(next);
-                  if (next !== "pt") {
-                    setTargetLang("pt");
-                    return;
-                  }
-                  if (next === targetLang) {
-                    setTargetLang("en");
-                  }
-                }}
+                onChange={(event) => setSourceLang(event.target.value as LanguageCode)}
               >
                 {LANGUAGES.map((lang) => (
                   <option key={lang} value={lang}>
@@ -225,23 +214,9 @@ export function Space() {
                   </option>
                 ))}
               </select>
-              <select
-                className="select"
-                value={targetLang}
-                onChange={(event) => {
-                  const next = event.target.value as LanguageCode;
-                  setTargetLang(next);
-                  if (next === sourceLang) {
-                    setSourceLang(next === "pt" ? "en" : "pt");
-                  }
-                }}
-              >
-                {LANGUAGES.map((lang) => (
-                  <option key={lang} value={lang}>
-                    Translate to {LANGUAGE_LABELS[lang]}
-                  </option>
-                ))}
-              </select>
+              <p className="original" style={{ margin: 0, alignSelf: "center" }}>
+                Each phone chooses its own language.
+              </p>
             </div>
 
             <div className="cta-row">

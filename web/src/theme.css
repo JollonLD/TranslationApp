@@ -77,10 +77,11 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   font-size: 0.78rem;
   color: var(--gold);
+  white-space: nowrap;
 }
 
 .brand-mark {
@@ -303,7 +304,31 @@ h2,
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
+}
+
+.listen-lang-wrap {
+  min-width: 0;
+}
+
+.listen-lang {
+  min-width: 0;
+  max-width: 220px;
+  padding: 8px 12px;
+  font-size: 0.95rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .listen-body {
@@ -355,6 +380,22 @@ h2,
 
 .transcript-line.partial {
   opacity: 0.8;
+}
+
+.rtl .transcript,
+.rtl .waiting {
+  direction: rtl;
+  text-align: right;
+}
+
+.rtl[data-lang="fa"] .transcript-line,
+.rtl[data-lang="fa"] .waiting {
+  font-family: "Noto Naskh Arabic", "Geeza Pro", "Arial", serif;
+}
+
+.rtl[data-lang="ur"] .transcript-line,
+.rtl[data-lang="ur"] .waiting {
+  font-family: "Noto Nastaliq Urdu", "Noto Naskh Arabic", "Geeza Pro", "Arial", serif;
 }
 
 .transcript-original {

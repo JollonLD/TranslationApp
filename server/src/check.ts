@@ -40,10 +40,14 @@ async function main() {
   });
 
   const joined = await new Promise<{ ok: boolean }>((resolve) => {
-    viewer.emit("space:join", { code: created.space?.code, role: "listener" }, resolve);
+    viewer.emit("space:join", { code: created.space?.code, role: "listener", targetLang: "it" }, resolve);
   });
 
-  const caption = await new Promise<{ original: string; translated: string }>((resolve, reject) => {
+  const caption = await new Promise<{
+    original: string;
+    translated: string;
+    translations?: Record<string, string>;
+  }>((resolve, reject) => {
     viewer.once("caption", resolve);
     host.emit("transcript", {
       code: created.space?.code,
@@ -68,8 +72,9 @@ async function main() {
     ptIt,
     itPt,
     liveOriginal: caption.original,
-    liveTranslated: caption.translated,
-    translatedAwayFromPortuguese: caption.translated.toLowerCase() !== caption.original.toLowerCase(),
+    liveTranslated: caption.translations?.it || caption.translated,
+    translatedAwayFromPortuguese:
+      (caption.translations?.it || caption.translated).toLowerCase() !== caption.original.toLowerCase(),
   };
 
   console.log(JSON.stringify(report, null, 2));

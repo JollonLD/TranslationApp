@@ -1,9 +1,9 @@
-# Palavra — tradução ao vivo para a igreja
+# Chiesa Il Faro — tradução ao vivo para a igreja
 
 No computador da cabine, o **espaço** escuta o áudio da mesa, traduz e mostra um QR. A plateia **escaneia o código** e lê a tradução no navegador do celular — Android ou iPhone, sem instalar aplicativo.
 
 ```
-Mesa (AUX/LINE) → computador da igreja → Chrome + servidor Palavra
+Mesa (AUX/LINE) → computador da igreja → Chrome + servidor Chiesa Il Faro
                                           ↓
                          QR público (Cloudflare)  →  celular com internet
 ```
@@ -25,7 +25,7 @@ No Linux, gere a pasta pronta para o PC da igreja:
 npm run build:win
 ```
 
-Isso cria `dist-windows/` com `Palavra.exe`, a interface e o `cloudflared.exe`. Copie **a pasta inteira** para o Windows e dê dois cliques em `Palavra.exe`. O programa sobe o servidor, abre o Chrome/Edge e gera o QR. Não precisa instalar Node nem npm nesse computador.
+Isso cria `dist-windows/` com `ChiesaIlFaro.bat`, Node portátil, a interface e o túnel. Copie **a pasta inteira** para o Windows e dê dois cliques em **`ChiesaIlFaro.bat`** (mais confiável que o `.exe`). Uma janela preta deve ficar aberta. O Chrome/Edge abre sozinho. Não precisa instalar Node nem npm nesse computador.
 
 O Windows 10/11 já tem o Edge (reconhecimento de fala). Na primeira execução, se o firewall perguntar, escolha **Permitir**.
 
@@ -76,7 +76,7 @@ Espere o QR virar um endereço `https://….trycloudflare.com`. Isso leva alguns
 
 ## Idiomas
 
-Padrão: português → inglês. No espaço dá para ouvir e traduzir em português, inglês, espanhol e italiano.
+Na cabine escolhe-se só a língua falada. Cada celular escolhe em que língua ler: português, inglês, espanhol, italiano, persa (فارسی) e urdu (اردو).
 
 A transcrição é gratuita (Web Speech API do Chrome). A tradução usa a API gratuita MyMemory, com um glossário curto de palavras de culto se a rede falhar.
 
@@ -90,5 +90,4 @@ web/      Páginas: início, espaço (cabine) e ouvir (celular)
 ## Depois desta versão
 
 - Whisper no próprio PC, para entender melhor o sermão
-- Vários idiomas ao mesmo tempo
 - Histórico do culto

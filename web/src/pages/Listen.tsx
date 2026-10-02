@@ -4,7 +4,16 @@ import { Flame } from "../components/Flame";
 import { TranscriptFeed } from "../components/TranscriptFeed";
 import { appendCaption, mergeSpaceCaptions } from "../lib/captions";
 import { getSocket } from "../socket";
-import { LANGUAGE_LABELS, type Caption, type SpaceState } from "../types";
+import {
+  LANGUAGE_LABELS,
+  LANGUAGES,
+  RTL_LANGUAGES,
+  isLanguage,
+  preferredReadLang,
+  type Caption,
+  type LanguageCode,
+  type SpaceState,
+} from "../types";
 
 const SIZES = ["1.7rem", "2.1rem", "2.7rem", "3.4rem"];
 
@@ -19,10 +28,15 @@ export function Listen() {
   const [connected, setConnected] = useState(false);
   const [manualCode, setManualCode] = useState("");
   const [size, setSize] = useState(1);
+  const [readLang, setReadLang] = useState<LanguageCode>(preferredReadLang);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--caption-size", SIZES[size]);
   }, [size]);
+
+  useEffect(() => {
+    window.localStorage.setItem("palavra-read-lang", readLang);
+  }, [readLang]);
 
   useEffect(() => {
     if (!code) return;
@@ -41,7 +55,7 @@ export function Listen() {
     const join = () => {
       socket.emit(
         "space:join",
-        { code, role: "listener" },
+        { code, role: "listener", targetLang: readLang },
         (result: { ok: boolean; space?: SpaceState; error?: string }) => {
           if (!result.ok || !result.space) {
             setError(result.error ?? "Could not join this space.");
@@ -86,20 +100,55 @@ export function Listen() {
     };
   }, [code]);
 
+  useEffect(() => {
+    if (!code || !connected) return;
+    getSocket().emit(
+      "space:viewLanguage",
+      { code, lang: readLang },
+      (result?: { ok?: boolean; space?: SpaceState }) => {
+        if (result?.space) {
+          setSpace(result.space);
+          setCaptions((current) => mergeSpaceCaptions(current, result.space!.captions));
+          setPartial(result.space.lastPartial);
+        }
+      },
+    );
+  }, [code, connected, readLang]);
+
   function goToCode(event: FormEvent) {
     event.preventDefault();
     const clean = manualCode.trim().toUpperCase();
     if (clean) navigate(`/ouvir/${clean}`);
   }
 
+  const rtl = RTL_LANGUAGES.has(readLang);
+
   return (
-    <div className="atmosphere listen-page">
+    <div className={`atmosphere listen-page${rtl ? " rtl" : ""}`} data-lang={readLang}>
       <div className="listen">
         <header className="listen-top">
           <span className="brand">
             <Flame className="brand-mark" />
-            Palavra
+            Chiesa Il Faro
           </span>
+          <label className="listen-lang-wrap">
+            <span className="sr-only">Language</span>
+            <select
+              className="select listen-lang"
+              value={readLang}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (isLanguage(next)) setReadLang(next);
+              }}
+              aria-label="Read in"
+            >
+              {LANGUAGES.map((lang) => (
+                <option key={lang} value={lang}>
+                  {LANGUAGE_LABELS[lang]}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="status">
             <span className={`dot ${connected && space && !ended ? "live" : ""}`} />
             {ended
@@ -109,7 +158,7 @@ export function Listen() {
                 : !connected
                   ? "No connection"
                   : space
-                    ? `Live · ${LANGUAGE_LABELS[space.sourceLang]} → ${LANGUAGE_LABELS[space.targetLang]}`
+                    ? `Live · ${LANGUAGE_LABELS[readLang]}`
                     : "Looking…"}
           </div>
           <div className="sizes" aria-label="Text size">
@@ -149,6 +198,7 @@ export function Listen() {
             <TranscriptFeed
               captions={captions}
               partial={partial}
+              language={readLang}
               emptyText="Waiting for the word…"
             />
           )}

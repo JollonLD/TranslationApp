@@ -7,20 +7,22 @@ const MYMEMORY_LOCALE: Record<LanguageCode, string> = {
   en: "en-US",
   es: "es-ES",
   it: "it-IT",
+  fa: "fa-IR",
+  ur: "ur-PK",
 };
 
 const GLOSSARY: Record<string, Partial<Record<LanguageCode, string>>> = {
-  irmãos: { en: "brothers and sisters", es: "hermanos", it: "fratelli" },
-  irmãs: { en: "sisters", es: "hermanas", it: "sorelle" },
-  louvor: { en: "worship", es: "alabanza", it: "lode" },
-  culto: { en: "service", es: "culto", it: "culto" },
-  pastor: { en: "pastor", es: "pastor", it: "pastore" },
-  amém: { en: "amen", es: "amén", it: "amen" },
-  aleluia: { en: "hallelujah", es: "aleluya", it: "alleluia" },
-  oração: { en: "prayer", es: "oración", it: "preghiera" },
-  palavra: { en: "the Word", es: "la Palabra", it: "la Parola" },
-  evangelho: { en: "gospel", es: "evangelio", it: "vangelo" },
-  igreja: { en: "church", es: "iglesia", it: "chiesa" },
+  irmãos: { en: "brothers and sisters", es: "hermanos", it: "fratelli", fa: "برادران", ur: "بھائیو" },
+  irmãs: { en: "sisters", es: "hermanas", it: "sorelle", fa: "خواهران", ur: "بہنیں" },
+  louvor: { en: "worship", es: "alabanza", it: "lode", fa: "پرستش", ur: "عبادت" },
+  culto: { en: "service", es: "culto", it: "culto", fa: "عبادت", ur: "عبادت" },
+  pastor: { en: "pastor", es: "pastor", it: "pastore", fa: "شبان", ur: "پادری" },
+  amém: { en: "amen", es: "amén", it: "amen", fa: "آمین", ur: "آمین" },
+  aleluia: { en: "hallelujah", es: "aleluya", it: "alleluia", fa: "هللویاه", ur: "ہللویاہ" },
+  oração: { en: "prayer", es: "oración", it: "preghiera", fa: "دعا", ur: "دعا" },
+  palavra: { en: "the Word", es: "la Palabra", it: "la Parola", fa: "کلام", ur: "کلام" },
+  evangelho: { en: "gospel", es: "evangelio", it: "vangelo", fa: "انجیل", ur: "انجیل" },
+  igreja: { en: "church", es: "iglesia", it: "chiesa", fa: "کلیسا", ur: "کلیسا" },
   "brothers and sisters": { pt: "irmãos" },
   sisters: { pt: "irmãs" },
   worship: { pt: "louvor" },
@@ -143,4 +145,21 @@ export async function translateText(
   } catch {
     return trimmed;
   }
+}
+
+export async function translateMany(
+  text: string,
+  source: LanguageCode,
+  targets: LanguageCode[],
+): Promise<Partial<Record<LanguageCode, string>>> {
+  const translations: Partial<Record<LanguageCode, string>> = {
+    [source]: text,
+  };
+  const unique = [...new Set(targets)].filter((lang) => lang !== source);
+  await Promise.all(
+    unique.map(async (lang) => {
+      translations[lang] = await translateText(text, source, lang);
+    }),
+  );
+  return translations;
 }

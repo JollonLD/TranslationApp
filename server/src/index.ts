@@ -3,10 +3,15 @@ import path from "node:path";
 import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
+import { installCrashGuard, writeLog } from "./boot.js";
 import { openAppWindow } from "./desktop.js";
 import { firewallHint } from "./firewall.js";
 import { getLanAddresses, localHostname, primaryLanAddress } from "./network.js";
-import { webDistDir } from "./paths.js";
+import { useResourceCwd, webDistDir } from "./paths.js";
+
+installCrashGuard();
+const appRoot = useResourceCwd();
+writeLog(`starting Chiesa Il Faro from ${appRoot}`);
 import {
   claimHost,
   createSpace,
@@ -19,18 +24,19 @@ import {
   setLanguages,
   setListening,
 } from "./spaces.js";
-import { translateText } from "./translate.js";
+import { translateMany } from "./translate.js";
 import { startPublicTunnel } from "./tunnel.js";
-import type { LanguageCode } from "./types.js";
+import { isLanguage, LANGUAGES, type Caption, type LanguageCode, type Space } from "./types.js";
 
 let publicBaseUrl = "";
 
 function viewerLink(code: string) {
   if (publicBaseUrl) return `${publicBaseUrl.replace(/\/$/, "")}/ouvir/${code}`;
-  return `http://${primaryLanAddress()}:${PORT}/ouvir/${code}`;
+  return `http://${primaryLanAddress()}:${listenPort}/ouvir/${code}`;
 }
 
 const PORT = Number(process.env.PORT ?? 3000);
+let listenPort = PORT;
 const roomName = (code: string) => `space:${normalizeCode(code)}`;
 
 const app = express();
@@ -94,6 +100,56 @@ function emitSpace(code: string) {
   io.to(roomName(code)).emit("space:state", publicSpace(space, Math.max(0, listenerCount(code) - (space.hostId ? 1 : 0))));
 }
 
+function listenerTargets(code: string): LanguageCode[] {
+  const langs = new Set<LanguageCode>();
+  for (const client of io.sockets.sockets.values()) {
+    if (client.data.code === code && client.data.role === "listener" && isLanguage(client.data.targetLang)) {
+      langs.add(client.data.targetLang);
+    }
+  }
+  return [...langs];
+}
+
+async function fillTranslations(space: Space, langs: LanguageCode[], limit = 80) {
+  const targets = langs.filter((lang) => lang !== space.sourceLang);
+  if (!targets.length) return false;
+  const recent = space.captions.slice(-limit);
+  const items = space.lastPartial ? [...recent, space.lastPartial] : recent;
+  let changed = false;
+  await Promise.all(
+    items.map(async (caption) => {
+      const missing = targets.filter((lang) => !caption.translations[lang]);
+      if (!missing.length) return;
+      Object.assign(caption.translations, await translateMany(caption.original, space.sourceLang, missing));
+      const first = missing.find((lang) => caption.translations[lang]);
+      if (first && caption.translations[first]) {
+        caption.translated = caption.translations[first]!;
+      }
+      changed = true;
+    }),
+  );
+  return changed;
+}
+
+function makeCaption(
+  text: string,
+  translations: Caption["translations"],
+  isFinal: boolean,
+): Caption {
+  const preferred =
+    translations.en ||
+    Object.values(translations).find((value) => value && value !== text) ||
+    text;
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    original: text,
+    translations,
+    translated: preferred || text,
+    isFinal,
+    at: Date.now(),
+  };
+}
+
 io.on("connection", (socket) => {
   socket.on(
     "space:create",
@@ -118,7 +174,7 @@ io.on("connection", (socket) => {
   socket.on(
     "space:join",
     (
-      payload: { code: string; role?: "host" | "listener" },
+      payload: { code: string; role?: "host" | "listener"; targetLang?: LanguageCode },
       ack?: (result: unknown) => void,
     ) => {
       const space = getSpace(payload?.code ?? "");
@@ -135,6 +191,7 @@ io.on("connection", (socket) => {
       socket.join(roomName(space.code));
       socket.data.code = space.code;
       socket.data.role = payload.role ?? "listener";
+      socket.data.targetLang = isLanguage(payload.targetLang) ? payload.targetLang : "en";
       emitSpace(space.code);
       ack?.({
         ok: true,
@@ -142,15 +199,45 @@ io.on("connection", (socket) => {
         publicUrl: viewerLink(space.code),
         publicBaseUrl: publicBaseUrl || null,
       });
+
+      if (socket.data.role === "listener") {
+        void fillTranslations(space, [socket.data.targetLang]).then((changed) => {
+          if (changed) emitSpace(space.code);
+        });
+      }
+    },
+  );
+
+  socket.on(
+    "space:viewLanguage",
+    (
+      payload: { code: string; lang?: LanguageCode },
+      ack?: (result: unknown) => void,
+    ) => {
+      const space = getSpace(payload?.code ?? "");
+      if (!space || !isLanguage(payload.lang)) {
+        ack?.({ ok: false, error: "Invalid language." });
+        return;
+      }
+      socket.data.code = space.code;
+      socket.data.role = socket.data.role ?? "listener";
+      socket.data.targetLang = payload.lang;
+      void fillTranslations(space, [payload.lang]).then(() => {
+        emitSpace(space.code);
+        ack?.({
+          ok: true,
+          space: publicSpace(space, Math.max(0, listenerCount(space.code) - (space.hostId ? 1 : 0))),
+        });
+      });
     },
   );
 
   socket.on(
     "space:languages",
-    (payload: { code: string; sourceLang: LanguageCode; targetLang: LanguageCode }) => {
+    (payload: { code: string; sourceLang: LanguageCode; targetLang?: LanguageCode }) => {
       const space = getSpace(payload.code);
       if (!space || space.hostId !== socket.id) return;
-      setLanguages(space, payload.sourceLang, payload.targetLang);
+      setLanguages(space, payload.sourceLang, payload.targetLang ?? space.targetLang);
       emitSpace(space.code);
     },
   );
@@ -171,17 +258,15 @@ io.on("connection", (socket) => {
       const text = payload.text?.trim();
       if (!text) return;
 
-      const translated = payload.isFinal || text.length > 8
-        ? await translateText(text, space.sourceLang, space.targetLang)
-        : "";
-
-      const caption = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        original: text,
-        translated: translated || text,
-        isFinal: Boolean(payload.isFinal),
-        at: Date.now(),
-      };
+      const requested = listenerTargets(space.code);
+      const shouldTranslate = payload.isFinal || text.length > 8;
+      const targets = shouldTranslate
+        ? requested.length
+          ? requested
+          : LANGUAGES
+        : [];
+      const translations = await translateMany(text, space.sourceLang, targets);
+      const caption = makeCaption(text, translations, Boolean(payload.isFinal));
 
       pushCaption(space, caption);
       io.to(roomName(space.code)).emit("caption", caption);
@@ -204,24 +289,46 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  const lan = getLanAddresses();
-  console.log(`\n  Palavra está no ar`);
-  console.log(`  Neste computador:  http://localhost:${PORT}`);
-  for (const address of lan) {
-    console.log(`  Na rede local:      http://${address}:${PORT}`);
-  }
-  console.log(`  Opening the public QR link…`);
-  openAppWindow(`http://localhost:${PORT}`);
-
-  const tunnel = startPublicTunnel(PORT);
-  void tunnel.ready.then((url) => {
-    if (url) {
-      publicBaseUrl = url;
-      console.log(`  QR público:         ${url}\n`);
-      io.emit("network:public", { publicBaseUrl: url });
+function startListening(port: number, attempt = 0) {
+  const onError = (error: NodeJS.ErrnoException) => {
+    httpServer.off("error", onError);
+    if (error.code === "EADDRINUSE" && attempt < 8) {
+      const next = port + 1;
+      writeLog(`port ${port} in use, trying ${next}`);
+      startListening(next, attempt + 1);
       return;
     }
-    console.log(`  Sem túnel público. O QR usará o IP local.\n`);
+    writeLog(`listen failed: ${error.message}`);
+    throw error;
+  };
+  httpServer.on("error", onError);
+
+  httpServer.listen(port, "0.0.0.0", () => {
+    httpServer.off("error", onError);
+    listenPort = port;
+    const lan = getLanAddresses();
+    const localUrl = `http://localhost:${port}`;
+    console.log(`\n  Chiesa Il Faro is running`);
+    console.log(`  This computer:  ${localUrl}`);
+    for (const address of lan) {
+      console.log(`  On the network: http://${address}:${port}`);
+    }
+    console.log(`  Opening the browser…`);
+    console.log(`  Keep this window open during the service.\n`);
+    writeLog(`listening on ${localUrl}`);
+    openAppWindow(localUrl);
+
+    const tunnel = startPublicTunnel(port);
+    void tunnel.ready.then((url) => {
+      if (url) {
+        publicBaseUrl = url;
+        console.log(`  Public QR:      ${url}\n`);
+        io.emit("network:public", { publicBaseUrl: url });
+        return;
+      }
+      console.log(`  Public link unavailable. The QR will use the local address.\n`);
+    });
   });
-});
+}
+
+startListening(PORT);

@@ -7,8 +7,8 @@ const steps = [
     text: "Use the mixer AUX, REC, or LINE OUT into the PC audio input. Chrome will hear that input as the microphone.",
   },
   {
-    title: "Open the space and choose the language",
-    text: "The voice can be Portuguese, English, Italian, or Spanish. Translation can go to any of these, including Portuguese.",
+    title: "Open the space and choose the spoken language",
+    text: "The booth only chooses the voice: Portuguese, English, Spanish, Italian, Persian, or Urdu. Each person picks their reading language on the phone.",
   },
   {
     title: "Show the QR to the room",
@@ -22,7 +22,7 @@ export function Onboarding() {
       <div className="shell">
         <span className="brand">
           <Flame className="brand-mark" />
-          Palavra
+          Chiesa Il Faro
         </span>
         <div className="steps">
           {steps.map((step, index) => (
