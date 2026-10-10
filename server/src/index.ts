@@ -13,6 +13,14 @@ installCrashGuard();
 const appRoot = useResourceCwd();
 writeLog(`starting Chiesa Il Faro from ${appRoot}`);
 import {
+  clearPhraseBuffer,
+  getPhraseBuffer,
+  PAUSE_MS,
+  stripCommittedPrefix,
+  stripOverlappingPrefix,
+} from "./phraseBuffer.js";
+import { clearPipeline, ensurePipeline, type PipelineJob } from "./pipeline.js";
+import {
   claimHost,
   createSpace,
   endSpace,
@@ -21,12 +29,14 @@ import {
   publicSpace,
   pushCaption,
   releaseHost,
+  setHostTail,
   setLanguages,
   setListening,
+  setTranslateHealth,
 } from "./spaces.js";
-import { translateMany } from "./translate.js";
+import { getTranslateHealth, translateMany } from "./translate.js";
 import { startPublicTunnel } from "./tunnel.js";
-import { isLanguage, LANGUAGES, type Caption, type LanguageCode, type Space } from "./types.js";
+import { isLanguage, type Caption, type LanguageCode, type Space } from "./types.js";
 
 let publicBaseUrl = "";
 
@@ -114,34 +124,275 @@ async function fillTranslations(space: Space, langs: LanguageCode[], limit = 80)
   const targets = langs.filter((lang) => lang !== space.sourceLang);
   if (!targets.length) return false;
   const recent = space.captions.slice(-limit);
-  const items = space.lastPartial ? [...recent, space.lastPartial] : recent;
   let changed = false;
   await Promise.all(
-    items.map(async (caption) => {
+    recent.map(async (caption) => {
       const missing = targets.filter((lang) => !caption.translations[lang]);
       if (!missing.length) return;
       Object.assign(caption.translations, await translateMany(caption.original, space.sourceLang, missing));
-      const first = missing.find((lang) => caption.translations[lang]);
-      if (first && caption.translations[first]) {
-        caption.translated = caption.translations[first]!;
+      if (!caption.translated) {
+        const first = missing.find((lang) => caption.translations[lang]);
+        if (first && caption.translations[first]) {
+          caption.translated = caption.translations[first]!;
+        }
       }
       changed = true;
     }),
   );
+  syncTranslateHealth(space);
   return changed;
+}
+
+function syncTranslateHealth(space: Space) {
+  const health = getTranslateHealth();
+  if (space.translateHealth !== health) {
+    setTranslateHealth(space, health);
+    return true;
+  }
+  return false;
+}
+
+function pipelineFor(code: string) {
+  return ensurePipeline(code, {
+    // Stage 2 — translate (up to 3 jobs in parallel)
+    translate: async (job: PipelineJob) => {
+      try {
+        const translations = await translateMany(job.text, job.sourceLang, job.targets);
+        return makeCaption(job.text, translations, true, job.seq);
+      } catch (error) {
+        console.warn("[pipeline] translate failed, emitting source text:", error);
+        const fallback: Caption["translations"] = { [job.sourceLang]: job.text };
+        for (const lang of job.targets) {
+          if (lang !== job.sourceLang) fallback[lang] = job.text;
+        }
+        return makeCaption(job.text, fallback, true, job.seq);
+      }
+    },
+    // Stage 3 — write in order; never rewrites prior captions
+    write: (caption) => {
+      const live = getSpace(code);
+      if (!live) return;
+      pushCaption(live, caption);
+      const healthChanged = syncTranslateHealth(live);
+      io.to(roomName(live.code)).emit("caption", caption);
+      if (healthChanged) emitSpace(live.code);
+    },
+  });
+}
+
+const COALESCE_MS = 350;
+const COALESCE_MAX_WORDS = 28;
+const END_SENTENCE = /[.?!…]$/;
+
+type CoalesceBucket = {
+  parts: string[];
+  sourceLang: LanguageCode;
+  targets: LanguageCode[];
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const coalesceBuckets = new Map<string, CoalesceBucket>();
+
+function wordCount(text: string) {
+  return text.split(" ").filter(Boolean).length;
+}
+
+/** Join coalesce parts without repeating overlapping ASR fragments. */
+function mergeCoalesceParts(parts: string[]): string {
+  let out = "";
+  for (const part of parts) {
+    const next = part.trim().replace(/\s+/g, " ");
+    if (!next) continue;
+    if (!out) {
+      out = next;
+      continue;
+    }
+    const outKey = out.toLowerCase();
+    const nextKey = next.toLowerCase();
+    if (outKey === nextKey || outKey.includes(nextKey)) continue;
+    if (nextKey.includes(outKey)) {
+      out = next;
+      continue;
+    }
+    const remainder = stripOverlappingPrefix(next, out);
+    if (!remainder) continue;
+    out = `${out} ${remainder}`.replace(/\s+/g, " ").trim();
+  }
+  return out;
+}
+
+/** Text already sent to the translate pipeline this session (coalesce-level cursor). */
+const releasedToPipeline = new Map<string, string>();
+
+function flushCoalesce(code: string) {
+  const bucket = coalesceBuckets.get(code);
+  if (!bucket) return;
+  if (bucket.timer) clearTimeout(bucket.timer);
+  coalesceBuckets.delete(code);
+  let text = mergeCoalesceParts(bucket.parts);
+  if (!text) return;
+
+  const space = getSpace(code);
+  if (!space) return;
+
+  // Pipeline cursor: never re-send what this space already translated
+  const already = releasedToPipeline.get(code) ?? "";
+  text = stripCommittedPrefix(text, already);
+  if (!text) return;
+  text = stripOverlappingPrefix(text, already);
+  if (!text) return;
+
+  const last = space.captions.at(-1);
+  if (last?.isFinal) {
+    const prev = last.original.trim().toLowerCase();
+    const next = text.toLowerCase();
+    if (prev === next || prev.includes(next)) return;
+  }
+
+  releasedToPipeline.set(code, [already, text].filter(Boolean).join(" ").replace(/\s+/g, " ").trim());
+  const piped = releasedToPipeline.get(code) ?? "";
+  const pipedWords = piped.split(" ").filter(Boolean);
+  if (pipedWords.length > 400) {
+    releasedToPipeline.set(code, pipedWords.slice(-200).join(" "));
+  }
+
+  pipelineFor(code).hear(text, bucket.sourceLang, bucket.targets);
+}
+
+/** Merge short commits so listeners get cohesive clauses, not fragments. */
+function enqueueCoalesce(space: Space, text: string, targets: LanguageCode[]) {
+  const code = space.code;
+  let trimmed = text.trim().replace(/\s+/g, " ");
+  if (!trimmed) return;
+
+  // Drop anything already sent to translate
+  const already = releasedToPipeline.get(code) ?? "";
+  trimmed = stripCommittedPrefix(trimmed, already);
+  trimmed = stripOverlappingPrefix(trimmed, already);
+  if (!trimmed) return;
+
+  let bucket = coalesceBuckets.get(code);
+  if (!bucket) {
+    bucket = {
+      parts: [],
+      sourceLang: space.sourceLang,
+      targets,
+      timer: null,
+    };
+    coalesceBuckets.set(code, bucket);
+  } else {
+    bucket.sourceLang = space.sourceLang;
+    const merged = new Set([...bucket.targets, ...targets]);
+    bucket.targets = [...merged];
+  }
+
+  const lastPart = bucket.parts.at(-1);
+  if (!lastPart || lastPart.toLowerCase() !== trimmed.toLowerCase()) {
+    bucket.parts.push(trimmed);
+  }
+
+  const joined = mergeCoalesceParts(bucket.parts);
+  const shouldFlushNow =
+    END_SENTENCE.test(joined) || wordCount(joined) >= COALESCE_MAX_WORDS;
+
+  if (bucket.timer) {
+    clearTimeout(bucket.timer);
+    bucket.timer = null;
+  }
+
+  if (shouldFlushNow) {
+    flushCoalesce(code);
+    return;
+  }
+
+  bucket.timer = setTimeout(() => {
+    flushCoalesce(code);
+  }, COALESCE_MS);
+}
+
+/** Stage 1 — listen: coalesce → parallel translate → ordered write */
+function hearPhrase(space: Space, text: string, options?: { allowSingle?: boolean }) {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (!trimmed) return;
+  const words = trimmed.split(" ").filter(Boolean).length;
+  if (words < 2 && !options?.allowSingle) return;
+  const requested = listenerTargets(space.code);
+  const targets = requested.length ? requested : [space.targetLang];
+  enqueueCoalesce(space, trimmed, targets);
+}
+
+const pauseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function armPauseFlush(code: string, delayMs = PAUSE_MS) {
+  const previous = pauseTimers.get(code);
+  if (previous) clearTimeout(previous);
+  pauseTimers.set(
+    code,
+    setTimeout(() => {
+      pauseTimers.delete(code);
+      const space = getSpace(code);
+      if (!space || !space.listening) return;
+      const buffer = getPhraseBuffer(code);
+      const snapshot = buffer.drainPause();
+      if (snapshot.tail !== space.hostTail) {
+        setHostTail(space, snapshot.tail);
+        io.to(roomName(space.code)).emit("space:tail", {
+          code: space.code,
+          tail: space.hostTail,
+          partial: space.lastPartial,
+        });
+      }
+      for (const commit of snapshot.commits) {
+        hearPhrase(space, commit.text, { allowSingle: true });
+      }
+      if (!buffer.hasPending()) return;
+      const since = buffer.msSinceLastInput();
+      if (since < PAUSE_MS) {
+        // Silence window not met yet (e.g. late re-arm) — wait the remainder
+        armPauseFlush(code, Math.max(40, PAUSE_MS - since + 20));
+        return;
+      }
+      // Silence ok but remnant too short for pause rules — force out (1-word tails)
+      const forced = buffer.flushAll();
+      if (forced.tail !== space.hostTail) {
+        setHostTail(space, forced.tail);
+        io.to(roomName(space.code)).emit("space:tail", {
+          code: space.code,
+          tail: space.hostTail,
+          partial: space.lastPartial,
+        });
+      }
+      for (const commit of forced.commits) {
+        hearPhrase(space, commit.text, { allowSingle: true });
+      }
+    }, delayMs),
+  );
+}
+
+function clearSpaceBuffers(code: string) {
+  const timer = pauseTimers.get(code);
+  if (timer) clearTimeout(timer);
+  pauseTimers.delete(code);
+  const coalesce = coalesceBuckets.get(code);
+  if (coalesce?.timer) clearTimeout(coalesce.timer);
+  coalesceBuckets.delete(code);
+  releasedToPipeline.delete(code);
+  clearPhraseBuffer(code);
+  clearPipeline(code);
 }
 
 function makeCaption(
   text: string,
   translations: Caption["translations"],
   isFinal: boolean,
+  seq?: number,
 ): Caption {
   const preferred =
-    translations.en ||
     Object.values(translations).find((value) => value && value !== text) ||
+    translations.en ||
     text;
   return {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: `c${seq ?? Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     original: text,
     translations,
     translated: preferred || text,
@@ -246,36 +497,62 @@ io.on("connection", (socket) => {
     const space = getSpace(payload.code);
     if (!space || space.hostId !== socket.id) return;
     setListening(space, payload.listening);
+    if (!payload.listening) {
+      const leftover = getPhraseBuffer(space.code).flushAll();
+      for (const commit of leftover.commits) {
+        hearPhrase(space, commit.text, { allowSingle: true });
+      }
+      flushCoalesce(space.code);
+      clearPhraseBuffer(space.code);
+      releasedToPipeline.delete(space.code);
+      const timer = pauseTimers.get(space.code);
+      if (timer) clearTimeout(timer);
+      pauseTimers.delete(space.code);
+      setHostTail(space, "");
+    } else {
+      // Fresh listen session — new commit cursor
+      clearPhraseBuffer(space.code);
+      releasedToPipeline.delete(space.code);
+    }
     emitSpace(space.code);
   });
 
   socket.on(
     "transcript",
-    async (payload: { code: string; text: string; isFinal: boolean }) => {
+    (payload: { code: string; text: string; isFinal: boolean }) => {
       const space = getSpace(payload.code);
       if (!space || space.hostId !== socket.id) return;
 
-      const text = payload.text?.trim();
-      if (!text) return;
+      const text = payload.text?.trim() ?? "";
+      if (!text && !payload.isFinal) return;
 
-      const requested = listenerTargets(space.code);
-      const shouldTranslate = payload.isFinal || text.length > 8;
-      const targets = shouldTranslate
-        ? requested.length
-          ? requested
-          : LANGUAGES
-        : [];
-      const translations = await translateMany(text, space.sourceLang, targets);
-      const caption = makeCaption(text, translations, Boolean(payload.isFinal));
+      const buffer = getPhraseBuffer(space.code);
+      const snapshot = buffer.push(text, Boolean(payload.isFinal));
 
-      pushCaption(space, caption);
-      io.to(roomName(space.code)).emit("caption", caption);
+      if (snapshot.tail !== space.hostTail) {
+        setHostTail(space, snapshot.tail);
+        io.to(roomName(space.code)).emit("space:tail", {
+          code: space.code,
+          tail: space.hostTail,
+          partial: space.lastPartial,
+        });
+      }
+
+      for (const commit of snapshot.commits) {
+        hearPhrase(space, commit.text);
+      }
+
+      // Always wait full pause window so drainPause can succeed, then re-arm if needed
+      armPauseFlush(space.code, PAUSE_MS);
+
+      if (syncTranslateHealth(space)) emitSpace(space.code);
     },
   );
 
   socket.on("space:end", (payload: { code: string }) => {
     const space = getSpace(payload.code);
     if (!space || space.hostId !== socket.id) return;
+    clearSpaceBuffers(space.code);
     io.to(roomName(space.code)).emit("space:ended");
     io.in(roomName(space.code)).socketsLeave(roomName(space.code));
     endSpace(space.code);
@@ -283,7 +560,10 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     const released = releaseHost(socket.id);
-    if (released) emitSpace(released.code);
+    if (released) {
+      clearSpaceBuffers(released.code);
+      emitSpace(released.code);
+    }
     const code = socket.data.code as string | undefined;
     if (code) emitSpace(code);
   });

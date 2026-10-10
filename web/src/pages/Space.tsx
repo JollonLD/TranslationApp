@@ -108,19 +108,28 @@ export function Space() {
       setPartial(next.lastPartial);
     });
     socket.on("caption", (caption: Caption) => {
-      if (caption.isFinal) {
-        setCaptions((current) => appendCaption(current, caption));
-        setPartial(null);
-        return;
-      }
-      setPartial(caption);
+      if (!caption.isFinal) return;
+      setCaptions((current) => appendCaption(current, caption));
     });
+    socket.on(
+      "space:tail",
+      (payload: { code?: string; tail?: string; partial?: Caption | null }) => {
+        setPartial(payload.partial ?? (payload.tail ? {
+          id: "host-tail",
+          original: payload.tail,
+          translated: payload.tail,
+          isFinal: false,
+          at: Date.now(),
+        } : null));
+      },
+    );
 
     return () => {
       window.clearInterval(poll);
       socket.off("network:public");
       socket.off("space:state");
       socket.off("caption");
+      socket.off("space:tail");
     };
   }, []);
 
@@ -188,10 +197,17 @@ export function Space() {
           <div>
             <p className="kicker">Booth space</p>
             <div className="status" style={{ marginTop: 12 }}>
-              <span className={`dot ${speech.listening ? "live" : ""}`} />
+              <span
+                className={`dot ${speech.listening ? "live" : ""}${space?.translateHealth === "down" ? " down" : space?.translateHealth === "degraded" ? " degraded" : ""}`}
+              />
               {speech.listening ? "Listening to the mixer" : "Ready to listen"}
               {` · voice in ${LANGUAGE_LABELS[sourceLang]}`}
               {space ? ` · ${Math.max(space.listenerCount, 0)} listening` : ""}
+              {space?.translateHealth === "down"
+                ? " · translation paused"
+                : space?.translateHealth === "degraded"
+                  ? " · translation slow"
+                  : ""}
             </div>
 
             <TranscriptFeed
@@ -199,6 +215,7 @@ export function Space() {
               partial={partial}
               language={sourceLang}
               showOriginal
+              showPartial
               emptyText="When the service starts, the spoken words will appear here and keep growing."
             />
 

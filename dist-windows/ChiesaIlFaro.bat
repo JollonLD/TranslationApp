@@ -7,15 +7,10 @@ echo.
 echo   Starting Chiesa Il Faro...
 echo   Do not close this window while the service is running.
 echo.
-
 if exist "node\node.exe" (
   "node\node.exe" server.cjs
-) else if exist "ChiesaIlFaro.exe" (
-  ChiesaIlFaro.exe
-) else if exist "Palavra.exe" (
-  Palavra.exe
 ) else (
-  echo Could not find node\node.exe or ChiesaIlFaro.exe
+  echo Could not find node\node.exe
   echo Copy the entire dist-windows folder to this computer.
   echo.
   pause

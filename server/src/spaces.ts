@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { Caption, LanguageCode, Space } from "./types.js";
+import type { Caption, LanguageCode, Space, TranslateHealth } from "./types.js";
 
 const spaces = new Map<string, Space>();
 const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -29,6 +29,8 @@ export function createSpace(
     createdAt: Date.now(),
     captions: [],
     lastPartial: null,
+    hostTail: "",
+    translateHealth: "ok",
   };
 
   spaces.set(code, space);
@@ -55,6 +57,7 @@ export function releaseHost(socketId: string): Space | undefined {
       space.hostId = null;
       space.listening = false;
       space.lastPartial = null;
+      space.hostTail = "";
       return space;
     }
   }
@@ -63,7 +66,30 @@ export function releaseHost(socketId: string): Space | undefined {
 
 export function setListening(space: Space, listening: boolean) {
   space.listening = listening;
-  if (!listening) space.lastPartial = null;
+  if (!listening) {
+    space.lastPartial = null;
+    space.hostTail = "";
+  }
+}
+
+export function setHostTail(space: Space, tail: string) {
+  space.hostTail = tail.trim();
+  if (!space.hostTail) {
+    space.lastPartial = null;
+    return;
+  }
+  space.lastPartial = {
+    id: `tail-${space.code}`,
+    original: space.hostTail,
+    translated: space.hostTail,
+    translations: { [space.sourceLang]: space.hostTail },
+    isFinal: false,
+    at: Date.now(),
+  };
+}
+
+export function setTranslateHealth(space: Space, health: TranslateHealth) {
+  space.translateHealth = health;
 }
 
 export function setLanguages(
@@ -78,10 +104,21 @@ export function setLanguages(
 export function pushCaption(space: Space, caption: Caption) {
   if (caption.isFinal) {
     const last = space.captions.at(-1);
-    if (last && last.original === caption.original) {
+    const sameOriginal =
+      last &&
+      last.original.trim().toLowerCase() === caption.original.trim().toLowerCase();
+    // Drop near-duplicate where the new line is already fully inside the previous
+    const nested =
+      last &&
+      last.isFinal &&
+      last.original.trim().toLowerCase().includes(caption.original.trim().toLowerCase()) &&
+      caption.original.trim().split(/\s+/).length <= last.original.trim().split(/\s+/).length;
+    if (last && (sameOriginal || nested)) {
+      // Never rewrite heard text — only fill missing languages
       space.captions[space.captions.length - 1] = {
-        ...caption,
-        translations: { ...last.translations, ...caption.translations },
+        ...last,
+        translations: { ...caption.translations, ...last.translations },
+        translated: last.translated || caption.translated,
       };
     } else {
       space.captions.push(caption);
@@ -104,6 +141,8 @@ export function publicSpace(space: Space, listenerCount: number) {
     listening: space.listening,
     captions: space.captions,
     lastPartial: space.lastPartial,
+    hostTail: space.hostTail,
+    translateHealth: space.translateHealth,
     listenerCount,
     createdAt: space.createdAt,
   };

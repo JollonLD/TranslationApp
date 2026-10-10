@@ -1,5 +1,7 @@
 export type LanguageCode = "pt" | "en" | "es" | "it" | "fa" | "ur";
 
+export type TranslateHealth = "ok" | "degraded" | "down";
+
 export type Caption = {
   id: string;
   original: string;
@@ -16,6 +18,8 @@ export type SpaceState = {
   listening: boolean;
   captions: Caption[];
   lastPartial: Caption | null;
+  hostTail?: string;
+  translateHealth?: TranslateHealth;
   listenerCount: number;
   createdAt: number;
 };

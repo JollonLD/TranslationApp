@@ -1,6 +1,5 @@
 node_modules
 dist
-dist-windows
 .cache
 *.log
 .env

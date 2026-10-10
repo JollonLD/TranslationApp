@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
-import { cp, mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -52,21 +52,14 @@ console.log("Downloading cloudflared for Windows…");
 await download(cloudflaredUrl, path.join(outDir, "cloudflared.exe"));
 
 console.log("Copying web files and launcher…");
+await rm(path.join(outDir, "web"), { recursive: true, force: true });
+await rm(path.join(outDir, "Palavra.bat"), { force: true });
+await rm(path.join(outDir, "Palavra.exe"), { force: true });
+await rm(path.join(outDir, "ChiesaIlFaro.exe"), { force: true });
 await cp(path.join(root, "web", "dist"), path.join(outDir, "web", "dist"), {
   recursive: true,
 });
 await cp(path.join(root, "scripts", "ChiesaIlFaro.bat"), path.join(outDir, "ChiesaIlFaro.bat"));
-await cp(path.join(root, "scripts", "Palavra.bat"), path.join(outDir, "Palavra.bat"));
-
-console.log("Creating ChiesaIlFaro.exe…");
-try {
-  run(
-    `npx --yes @yao-pkg/pkg dist-windows/server.cjs --targets node22-win-x64 --output dist-windows/ChiesaIlFaro.exe`,
-  );
-} catch (error) {
-  console.warn("Could not build ChiesaIlFaro.exe. Use ChiesaIlFaro.bat on Windows instead.");
-  console.warn(error instanceof Error ? error.message : error);
-}
 
 await writeFile(
   path.join(outDir, "START.txt"),
@@ -74,13 +67,12 @@ await writeFile(
     "Chiesa Il Faro for Windows",
     "",
     "1. Copy this WHOLE folder to the church computer.",
-    "2. Double-click ChiesaIlFaro.bat  (preferred)",
-    "   or ChiesaIlFaro.exe",
+    "2. Double-click ChiesaIlFaro.bat",
     "3. A black window must stay open. If it closes, open palavra.log.",
     "4. If Windows asks about the firewall, choose Allow.",
     "5. Chrome or Edge should open. Click Start and show the QR.",
     "",
-    "Do not move ChiesaIlFaro.bat / ChiesaIlFaro.exe away from this folder.",
+    "Do not move ChiesaIlFaro.bat away from this folder.",
     "",
   ].join("\n"),
   "utf8",

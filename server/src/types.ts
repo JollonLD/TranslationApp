@@ -1,5 +1,7 @@
 export type LanguageCode = "pt" | "en" | "es" | "it" | "fa" | "ur";
 
+export type TranslateHealth = "ok" | "degraded" | "down";
+
 export type Caption = {
   id: string;
   original: string;
@@ -18,6 +20,8 @@ export type Space = {
   createdAt: number;
   captions: Caption[];
   lastPartial: Caption | null;
+  hostTail: string;
+  translateHealth: TranslateHealth;
 };
 
 export const LANGUAGES: LanguageCode[] = ["pt", "en", "es", "it", "fa", "ur"];

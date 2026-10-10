@@ -1,12 +1,19 @@
 # Chiesa Il Faro — tradução ao vivo para a igreja
 
-No computador da cabine, o **espaço** escuta o áudio da mesa, traduz e mostra um QR. A plateia **escaneia o código** e lê a tradução no navegador do celular — Android ou iPhone, sem instalar aplicativo.
+No computador da cabine, o **espaço** escuta o áudio da mesa, traduz e mostra um QR. A plateia **escaneia o código** e lê a tradução no navegador do celular — Android ou iPhone, sem instalar aplicativo. Saída **somente texto** (sem áudio TTS).
 
 ```
-Mesa (AUX/LINE) → computador da igreja → Chrome + servidor Chiesa Il Faro
+Mesa (AUX/LINE) → Chrome (fala) → buffer semântico → tradução gratuita
                                           ↓
-                         QR público (Cloudflare)  →  celular com internet
+                         QR público (Cloudflare)  →  celular (texto)
 ```
+
+## Pipeline (gratuito)
+
+1. **Escuta** — Web Speech API do Chrome/Edge na cabine (microfone da mesa, sem filtros de ruído).
+2. **Buffer semântico** — junta cláusulas (ponto, vírgula/conectivo, pausa) antes de traduzir; não traduz palavra a palavra.
+3. **Traduz** — até 3 trechos em paralelo (Google Translate → Lingva → MyMemory; DeepL só se `DEEPL_API_KEY` existir). Sem LLM pago.
+4. **Escreve** — publica linhas finais em ordem; o que já saiu **não é reescrito**.
 
 ## O que você precisa
 
@@ -14,7 +21,7 @@ Mesa (AUX/LINE) → computador da igreja → Chrome + servidor Chiesa Il Faro
 - Chrome ou Edge no PC da igreja (é ele que ouve o microfone)
 - Mesa de som com saída **AUX**, **REC** ou **LINE OUT**
 - Cabo ou interface USB para ligar a mesa no computador
-- Internet no computador da cabine (para gerar o QR público)
+- Internet no computador da cabine (para gerar o QR público e traduzir)
 - Internet no celular da plateia (não precisa ser a mesma Wi‑Fi)
 
 ## Windows (executável)
@@ -25,7 +32,7 @@ No Linux, gere a pasta pronta para o PC da igreja:
 npm run build:win
 ```
 
-Isso cria `dist-windows/` com `ChiesaIlFaro.bat`, Node portátil, a interface e o túnel. Copie **a pasta inteira** para o Windows e dê dois cliques em **`ChiesaIlFaro.bat`** (mais confiável que o `.exe`). Uma janela preta deve ficar aberta. O Chrome/Edge abre sozinho. Não precisa instalar Node nem npm nesse computador.
+Isso cria `dist-windows/` com `ChiesaIlFaro.bat`, Node portátil, a interface e o túnel. Copie **a pasta inteira** para o Windows e dê dois cliques em **`ChiesaIlFaro.bat`**. Uma janela preta deve ficar aberta. O Chrome/Edge abre sozinho. Não precisa instalar Node nem npm nesse computador.
 
 O Windows 10/11 já tem o Edge (reconhecimento de fala). Na primeira execução, se o firewall perguntar, escolha **Permitir**.
 
@@ -78,12 +85,12 @@ Espere o QR virar um endereço `https://….trycloudflare.com`. Isso leva alguns
 
 Na cabine escolhe-se só a língua falada. Cada celular escolhe em que língua ler: português, inglês, espanhol, italiano, persa (فارسی) e urdu (اردو).
 
-A transcrição é gratuita (Web Speech API do Chrome). A tradução usa a API gratuita MyMemory, com um glossário curto de palavras de culto se a rede falhar.
+Só os idiomas dos celulares conectados são traduzidos (mais rápido). Há um glossário evangélico (livros da Bíblia, referências de versículos, doutrina e culto) em `server/src/churchGlossary.ts`.
 
 ## Estrutura
 
 ```
-server/   Express + Socket.IO + tradução
+server/   Express + Socket.IO + buffer + pipeline de tradução
 web/      Páginas: início, espaço (cabine) e ouvir (celular)
 ```
 

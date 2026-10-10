@@ -22,13 +22,14 @@ export function Listen() {
   const navigate = useNavigate();
   const [space, setSpace] = useState<SpaceState | null>(null);
   const [captions, setCaptions] = useState<Caption[]>([]);
-  const [partial, setPartial] = useState<Caption | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [manualCode, setManualCode] = useState("");
   const [size, setSize] = useState(1);
   const [readLang, setReadLang] = useState<LanguageCode>(preferredReadLang);
+  const translateHealth = space?.translateHealth ?? "ok";
+  const showHealthBanner = Boolean(space && !ended && translateHealth === "down");
 
   useEffect(() => {
     document.documentElement.style.setProperty("--caption-size", SIZES[size]);
@@ -44,12 +45,10 @@ export function Listen() {
     setError(null);
     setEnded(false);
     setCaptions([]);
-    setPartial(null);
 
     const applyState = (next: SpaceState) => {
       setSpace(next);
       setCaptions((current) => mergeSpaceCaptions(current, next.captions));
-      setPartial(next.lastPartial);
     };
 
     const join = () => {
@@ -74,12 +73,8 @@ export function Listen() {
     socket.on("disconnect", () => setConnected(false));
     socket.on("space:state", applyState);
     socket.on("caption", (caption: Caption) => {
-      if (caption.isFinal) {
-        setCaptions((current) => appendCaption(current, caption));
-        setPartial(null);
-        return;
-      }
-      setPartial(caption);
+      if (!caption.isFinal) return;
+      setCaptions((current) => appendCaption(current, caption));
     });
     socket.on("space:ended", () => {
       setEnded(true);
@@ -109,7 +104,6 @@ export function Listen() {
         if (result?.space) {
           setSpace(result.space);
           setCaptions((current) => mergeSpaceCaptions(current, result.space!.captions));
-          setPartial(result.space.lastPartial);
         }
       },
     );
@@ -172,6 +166,11 @@ export function Listen() {
         </header>
 
         <main className="listen-body">
+          {showHealthBanner ? (
+            <p className="health-banner" role="status">
+              Translation paused — still listening
+            </p>
+          ) : null}
           {error || ended || !code ? (
             <div>
               <p className={`waiting ${error || ended ? "error" : ""}`}>
@@ -197,8 +196,9 @@ export function Listen() {
           ) : (
             <TranscriptFeed
               captions={captions}
-              partial={partial}
+              partial={null}
               language={readLang}
+              showPartial={false}
               emptyText="Waiting for the word…"
             />
           )}

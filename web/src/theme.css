@@ -339,6 +339,14 @@ h2,
   padding: 28px 0 18px;
 }
 
+.transcript-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .transcript {
   flex: 1;
   min-height: 220px;
@@ -349,6 +357,7 @@ h2,
   gap: 1.05em;
   padding-right: 8px;
   mask-image: linear-gradient(180deg, transparent, #000 28px, #000 calc(100% - 12px), transparent);
+  scroll-behavior: auto;
 }
 
 .listen-page .transcript {
@@ -366,20 +375,59 @@ h2,
 .transcript-line {
   font-family: var(--display);
   font-size: var(--caption-size);
-  line-height: 1.2;
+  line-height: 1.35;
   width: min(920px, 100%);
   margin: 0;
-  color: rgba(244, 234, 212, 0.72);
-  animation: rise 280ms ease;
+  color: rgba(244, 234, 212, 0.58);
 }
 
-.transcript-line.latest,
-.transcript-line.partial {
+.transcript-line.latest {
   color: var(--paper);
 }
 
+.transcript-line.enter {
+  animation: rise 280ms ease;
+}
+
 .transcript-line.partial {
-  opacity: 0.8;
+  color: rgba(244, 234, 212, 0.42);
+  opacity: 1;
+}
+
+.back-to-live {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 2;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: rgba(20, 17, 13, 0.88);
+  color: var(--paper);
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.health-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(122, 46, 42, 0.35);
+  border: 1px solid rgba(224, 122, 106, 0.35);
+  color: var(--paper);
+  font-size: 0.95rem;
+}
+
+.dot.degraded {
+  background: var(--gold);
+  box-shadow: 0 0 0 4px rgba(232, 184, 109, 0.18);
+}
+
+.dot.down {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px rgba(224, 122, 106, 0.18);
 }
 
 .rtl .transcript,
