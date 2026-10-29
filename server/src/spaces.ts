@@ -103,25 +103,37 @@ export function setLanguages(
 
 export function pushCaption(space: Space, caption: Caption) {
   if (caption.isFinal) {
-    const last = space.captions.at(-1);
-    const sameOriginal =
-      last &&
-      last.original.trim().toLowerCase() === caption.original.trim().toLowerCase();
-    // Drop near-duplicate where the new line is already fully inside the previous
-    const nested =
-      last &&
-      last.isFinal &&
-      last.original.trim().toLowerCase().includes(caption.original.trim().toLowerCase()) &&
-      caption.original.trim().split(/\s+/).length <= last.original.trim().split(/\s+/).length;
-    if (last && (sameOriginal || nested)) {
-      // Never rewrite heard text — only fill missing languages
-      space.captions[space.captions.length - 1] = {
-        ...last,
-        translations: { ...caption.translations, ...last.translations },
-        translated: last.translated || caption.translated,
+    const existingIndex = space.captions.findIndex((item) => item.id === caption.id);
+    if (existingIndex >= 0) {
+      const prev = space.captions[existingIndex];
+      space.captions[existingIndex] = {
+        ...prev,
+        ...caption,
+        translations: { ...prev.translations, ...caption.translations },
+        translated: caption.translated || prev.translated,
+        isFinal: true,
+        live: false,
       };
     } else {
-      space.captions.push(caption);
+      const last = space.captions.at(-1);
+      const sameOriginal =
+        last &&
+        last.original.trim().toLowerCase() === caption.original.trim().toLowerCase();
+      const nested =
+        last &&
+        last.isFinal &&
+        last.original.trim().toLowerCase().includes(caption.original.trim().toLowerCase()) &&
+        caption.original.trim().split(/\s+/).length <= last.original.trim().split(/\s+/).length;
+      if (last && (sameOriginal || nested)) {
+        space.captions[space.captions.length - 1] = {
+          ...last,
+          translations: { ...caption.translations, ...last.translations },
+          translated: last.translated || caption.translated,
+          bibleRef: caption.bibleRef || last.bibleRef,
+        };
+      } else {
+        space.captions.push({ ...caption, live: false });
+      }
     }
     space.lastPartial = null;
     if (space.captions.length > 2000) {
@@ -131,6 +143,33 @@ export function pushCaption(space: Space, caption: Caption) {
   }
 
   space.lastPartial = caption;
+}
+
+/** In-place update of a frozen (or live) caption by id. */
+export function updateCaption(space: Space, caption: Caption) {
+  const index = space.captions.findIndex((item) => item.id === caption.id);
+  if (index >= 0) {
+    const prev = space.captions[index];
+    space.captions[index] = {
+      ...prev,
+      ...caption,
+      translations: { ...prev.translations, ...caption.translations },
+      translated: caption.translated || prev.translated,
+    };
+    return space.captions[index];
+  }
+  if (!caption.isFinal) {
+    space.lastPartial = {
+      ...caption,
+      translations: {
+        ...(space.lastPartial?.translations ?? {}),
+        ...caption.translations,
+      },
+    };
+    return space.lastPartial;
+  }
+  space.captions.push(caption);
+  return caption;
 }
 
 export function publicSpace(space: Space, listenerCount: number) {

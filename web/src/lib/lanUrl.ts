@@ -5,7 +5,11 @@ function isLoopback(host: string) {
 function isUsableBase(base: string) {
   try {
     const url = new URL(base);
-    return !isLoopback(url.hostname);
+    if (isLoopback(url.hostname)) return false;
+    // cloudflared logs also mention api.trycloudflare.com — never use that for the QR
+    const host = url.hostname.toLowerCase();
+    if (host === "api.trycloudflare.com" || host === "www.trycloudflare.com") return false;
+    return true;
   } catch {
     return false;
   }

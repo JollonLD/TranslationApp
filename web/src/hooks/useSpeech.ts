@@ -15,11 +15,12 @@ export function isSpeechSupported() {
 }
 
 const RECOVERABLE = new Set(["no-speech", "aborted", "network", "audio-capture"]);
-const SOFT_RECYCLE_MS = 48_000;
-const WATCHDOG_MS = 1_500;
+/** Recycle less often so Chrome keeps a longer continuous utterance. */
+const SOFT_RECYCLE_MS = 90_000;
+const WATCHDOG_MS = 2_000;
 const MAX_FAILS_BEFORE_ERROR = 3;
-/** Send interim when wording changes, not only when word count grows. */
-const INTERIM_THROTTLE_MS = 120;
+/** Slightly slower interim updates → more stable server buffer. */
+const INTERIM_THROTTLE_MS = 180;
 
 /** Raw line-in from the mixer — no browser processing / noise filters. */
 const RAW_AUDIO = {
@@ -29,6 +30,7 @@ const RAW_AUDIO = {
   voiceIsolation: false,
 } as MediaTrackConstraints;
 
+/** Only true disfluencies — keep sermon discourse words (então, assim, aí). */
 const FILLER = new Set([
   "uh",
   "um",
@@ -43,11 +45,6 @@ const FILLER = new Set([
   "tipo",
   "né",
   "ne",
-  "assim",
-  "aí",
-  "ai",
-  "então",
-  "entao",
   "well",
   "like",
   "youknow",
@@ -188,8 +185,9 @@ export function useSpeech(lang: LanguageCode, handlers: SpeechHandlers) {
     clearRecycle();
     const tryRecycle = () => {
       if (!shouldRun.current || !recognitionRef.current) return;
-      if (Date.now() - lastResultAt.current < 1_200) {
-        recycleTimer.current = window.setTimeout(tryRecycle, 500);
+      // Don't recycle while the pastor is still speaking
+      if (Date.now() - lastResultAt.current < 3_500) {
+        recycleTimer.current = window.setTimeout(tryRecycle, 800);
         return;
       }
       recycling.current = true;

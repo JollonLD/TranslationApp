@@ -6,7 +6,8 @@
     "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
     "start": "npm run build -w web && npm run start -w server",
     "build": "npm run build -w web",
-    "build:win": "node scripts/build-windows.mjs"
+    "build:win": "node scripts/build-windows.mjs",
+    "test:e2e": "npm run test:e2e -w server"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

@@ -17,7 +17,7 @@ export function TranscriptFeed({
   partial,
   language,
   showOriginal = false,
-  showPartial = false,
+  showPartial = true,
   emptyText,
 }: TranscriptFeedProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -54,18 +54,16 @@ export function TranscriptFeed({
     const previous = prevCount.current;
     prevCount.current = captions.length;
 
-    if (!grew) return;
-
-    if (previous > 0) {
+    if (grew && previous > 0) {
       setFreshId(latestId);
     }
 
     if (!stickToBottom.current) {
-      setShowJump(true);
+      if (grew) setShowJump(true);
       return;
     }
     scrollToBottom(false);
-  }, [captions.length, latestId, scrollToBottom]);
+  }, [captions.length, latestId, partial?.translated, partial?.original, scrollToBottom]);
 
   if (!captions.length && !visiblePartial) {
     return <p className="waiting">{emptyText}</p>;
@@ -79,12 +77,16 @@ export function TranscriptFeed({
             key={caption.id}
             className={`transcript-line${index === captions.length - 1 && !visiblePartial ? " latest" : ""}${caption.id === freshId ? " enter" : ""}`}
           >
+            {caption.bibleRef ? <span className="bible-chip">{caption.bibleRef}</span> : null}
             {language ? captionText(caption, language) : caption.translated}
             {showOriginal ? <span className="transcript-original">{caption.original}</span> : null}
           </p>
         ))}
         {visiblePartial ? (
-          <p className="transcript-line partial" key={visiblePartial.id}>
+          <p className="transcript-line partial live" key={visiblePartial.id}>
+            {visiblePartial.bibleRef ? (
+              <span className="bible-chip">{visiblePartial.bibleRef}</span>
+            ) : null}
             {language ? captionText(visiblePartial, language) : visiblePartial.translated}
             {showOriginal ? (
               <span className="transcript-original">{visiblePartial.original}</span>

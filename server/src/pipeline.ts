@@ -3,6 +3,8 @@ import type { Caption, LanguageCode } from "./types.js";
 export type PipelineJob = {
   seq: number;
   text: string;
+  /** Prior source speech for contextual translation (not displayed again). */
+  context: string;
   sourceLang: LanguageCode;
   targets: LanguageCode[];
 };
@@ -12,8 +14,8 @@ type PipelineHooks = {
   write: (caption: Caption) => void;
 };
 
-/** Concurrent translate workers — listen / translate / write overlap in time */
-const TRANSLATE_WORKERS = 4;
+/** Few workers — NVIDIA polish is sequential; avoid huge backlog */
+const TRANSLATE_WORKERS = 2;
 
 /**
  * Free text-only pipeline per space (no LLM, no TTS):
@@ -35,7 +37,12 @@ export class SpacePipeline {
   }
 
   /** Stage 1 — listen */
-  hear(text: string, sourceLang: LanguageCode, targets: LanguageCode[]) {
+  hear(
+    text: string,
+    sourceLang: LanguageCode,
+    targets: LanguageCode[],
+    context = "",
+  ) {
     if (this.closed) return;
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -43,6 +50,7 @@ export class SpacePipeline {
     this.listenQueue.push({
       seq: this.nextSeq,
       text: trimmed,
+      context: context.trim(),
       sourceLang,
       targets,
     });

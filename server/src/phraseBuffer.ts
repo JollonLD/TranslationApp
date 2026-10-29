@@ -1,15 +1,20 @@
 /**
- * Streaming phrase buffer with a permanent commit cursor.
- * Once text is released, it never reappears in later commits or the live tail.
+ * Streaming phrase buffer with a permanent commit cursor + rolling context.
+ * Prefers full sentences / breath pauses so captions stay readable.
  *
- * Flow: listen → accumulate uncommitted words → on pause/clause → release → translate.
+ * Flow: listen → accumulate → release on sentence or pause → translate with context.
  */
-export const PAUSE_MS = 600;
-const STABLE_MS = 280;
+export const PAUSE_MS = 780;
+const STABLE_MS = 260;
 const TAIL_WORDS = 2;
-const MIN_RELEASE_WORDS = 3;
-const MIN_PAUSE_WORDS = 2;
-const MAX_PENDING_WORDS = 18;
+/** Soft release only for real sentence endings. */
+const MIN_SENTENCE_WORDS = 5;
+/** On silence, release a readable phrase (not tiny scraps). */
+const MIN_PAUSE_WORDS = 4;
+/** Hard safety net — prefer waiting for pause/sentence before this. */
+const MAX_PENDING_WORDS = 24;
+/** How much prior source speech to attach for translation context. */
+const CONTEXT_WORDS = 100;
 const END_PUNCT = /[.?!…]$/;
 const CLAUSE_BREAK = /[,;:]$/;
 
@@ -28,9 +33,12 @@ const FILLER = new Set([
   "well",
   "like",
 ]);
+// Keep “então / assim / aí” — they carry sermon meaning
 
 export type PhraseCommit = {
   text: string;
+  /** Prior committed speech (not re-emitted) — for contextual translation. */
+  context: string;
   isFinal: boolean;
 };
 
@@ -175,6 +183,13 @@ export class PhraseBuffer {
     return this.committed;
   }
 
+  /** Last N words already released — used as MT context without re-emitting. */
+  getContextWindow(maxWords = CONTEXT_WORDS): string {
+    const parts = wordsOf(this.committed);
+    if (parts.length <= maxWords) return this.committed;
+    return parts.slice(-maxWords).join(" ");
+  }
+
   push(raw: string, isFinal: boolean, now = Date.now()): PhraseSnapshot {
     const text = cleanDisfluency(raw);
     this.lastInputAt = now;
@@ -228,7 +243,9 @@ export class PhraseBuffer {
     const text = this.pendingText();
     this.pending = [];
     const piece = this.advanceCursor(text);
-    return piece ? [{ text: piece, isFinal: true }] : [];
+    return piece
+      ? [{ text: piece.text, context: piece.context, isFinal: true }]
+      : [];
   }
 
   drainPause(now = Date.now()): PhraseSnapshot {
@@ -248,7 +265,9 @@ export class PhraseBuffer {
     this.lastInputAt = now;
     const piece = this.advanceCursor(text);
     return {
-      commits: piece ? [{ text: piece, isFinal: true }] : [],
+      commits: piece
+        ? [{ text: piece.text, context: piece.context, isFinal: true }]
+        : [],
       tail: "",
     };
   }
@@ -357,7 +376,13 @@ export class PhraseBuffer {
       const piece = this.takeChunk(reason);
       if (!piece) break;
       const advanced = this.advanceCursor(piece);
-      if (advanced) commits.push({ text: advanced, isFinal: true });
+      if (advanced) {
+        commits.push({
+          text: advanced.text,
+          context: advanced.context,
+          isFinal: true,
+        });
+      }
     }
 
     return { commits, tail: this.displayTail() };
@@ -372,28 +397,28 @@ export class PhraseBuffer {
     const endsClause = CLAUSE_BREAK.test(held);
 
     if (reason === "pause") {
-      if (n >= MIN_PAUSE_WORDS || endsSentence || endsClause) {
+      // Breath pause → one readable line (whole pending hold)
+      if (n >= MIN_PAUSE_WORDS || endsSentence) {
         this.pending = [];
         return held;
       }
       return null;
     }
 
-    // soft — release natural chunks while speech continues
-    if (endsSentence && n >= MIN_RELEASE_WORDS) {
+    // Soft while speaking: only complete sentences — never chop on commas mid-thought
+    if (endsSentence && n >= MIN_SENTENCE_WORDS) {
       const cut = this.cutAtSentence(held);
       if (cut) return cut;
       this.pending = [];
       return held;
     }
+    const sentenceCut = this.cutAtSentence(held);
+    if (sentenceCut) return sentenceCut;
 
-    if (endsClause && n >= MIN_RELEASE_WORDS) {
-      const cut = this.cutAtClause(held);
-      if (cut) return cut;
-    }
-
-    // Size safety: release a block and keep the rest pending (cursor advances)
+    // Safety: very long run without punctuation — cut at last clause, else hard cap
     if (n >= MAX_PENDING_WORDS) {
+      const clause = this.cutAtClause(held, 10);
+      if (clause) return clause;
       const parts = wordsOf(held);
       const head = parts.slice(0, MAX_PENDING_WORDS).join(" ");
       this.pending = parts.slice(MAX_PENDING_WORDS).map((text) => ({
@@ -403,6 +428,7 @@ export class PhraseBuffer {
       return head;
     }
 
+    void endsClause;
     return null;
   }
 
@@ -410,24 +436,27 @@ export class PhraseBuffer {
     const match = text.match(/^([\s\S]+?[.?!…])(?:\s+|$)/);
     if (!match) return null;
     const piece = match[1].trim();
-    if (wordCount(piece) < MIN_RELEASE_WORDS) return null;
+    if (wordCount(piece) < MIN_SENTENCE_WORDS) return null;
     const rest = text.slice(match[0].length).trim();
     this.pending = wordsOf(rest).map((w) => ({ text: w, since: this.lastInputAt }));
     return piece;
   }
 
-  private cutAtClause(text: string): string | null {
+  private cutAtClause(text: string, minWords: number): string | null {
     const match = text.match(/^([\s\S]+?[,;:])(?:\s+|$)/);
     if (!match) return null;
     const piece = match[1].trim();
-    if (wordCount(piece) < MIN_RELEASE_WORDS) return null;
+    if (wordCount(piece) < minWords) return null;
     const rest = text.slice(match[0].length).trim();
     this.pending = wordsOf(rest).map((w) => ({ text: w, since: this.lastInputAt }));
     return piece;
   }
 
-  /** Permanently advance cursor — committed text can never be released again. */
-  private advanceCursor(text: string): string | null {
+  /**
+   * Permanently advance cursor — committed text can never be released again.
+   * Returns the new segment plus the context window from BEFORE this segment.
+   */
+  private advanceCursor(text: string): { text: string; context: string } | null {
     let out = normalize(text);
     if (!out) return null;
 
@@ -438,13 +467,14 @@ export class PhraseBuffer {
     const committedKey = normKey(this.committed);
     if (committedKey && (committedKey === key || committedKey.endsWith(key))) return null;
 
+    const context = this.getContextWindow(CONTEXT_WORDS);
     this.committed = joinWords([this.committed, out]);
     // Keep committed from growing without bound (session sermon can be long)
     const committedWords = wordsOf(this.committed);
     if (committedWords.length > 400) {
       this.committed = committedWords.slice(-200).join(" ");
     }
-    return out;
+    return { text: out, context };
   }
 
   private pendingText() {

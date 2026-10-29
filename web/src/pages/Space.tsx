@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Flame } from "../components/Flame";
 import { TranscriptFeed } from "../components/TranscriptFeed";
+import { useMixerPcm } from "../hooks/useMixerPcm";
 import { useSpeech } from "../hooks/useSpeech";
-import { appendCaption, mergeSpaceCaptions } from "../lib/captions";
+import { appendCaption, mergeSpaceCaptions, updateCaption } from "../lib/captions";
 import { viewerUrl } from "../lib/lanUrl";
 import { getSocket } from "../socket";
 import {
@@ -27,15 +28,28 @@ export function Space() {
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [partial, setPartial] = useState<Caption | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [asrMode, setAsrMode] = useState<"whisperlivekit" | "webspeech">("webspeech");
   const created = useRef(false);
   const publicReady = useRef(false);
+  const spaceRef = useRef<SpaceState | null>(null);
 
   const speech = useSpeech(sourceLang, {
     onTranscript: (text, isFinal) => {
-      if (!space) return;
-      getSocket().emit("transcript", { code: space.code, text, isFinal });
+      const live = spaceRef.current;
+      if (!live) return;
+      getSocket().emit("transcript", { code: live.code, text, isFinal });
     },
   });
+  const pcm = useMixerPcm({
+    onPcm: (buffer) => {
+      const live = spaceRef.current;
+      if (!live) return;
+      getSocket().emit("asr:pcm", live.code, buffer);
+    },
+  });
+  const useWhisper = asrMode === "whisperlivekit";
+  const listening = useWhisper ? pcm.listening : speech.listening;
+  const listenError = useWhisper ? pcm.error : speech.error;
 
   useEffect(() => {
     const socket = getSocket();
@@ -58,6 +72,7 @@ export function Space() {
           setSetupError(result.error ?? "Could not open the space.");
           return;
         }
+        spaceRef.current = result.space;
         setSpace(result.space);
         setPublicUrl(result.publicUrl ?? "");
         if (result.publicBaseUrl) {
@@ -85,6 +100,13 @@ export function Space() {
       .then(applyNetwork)
       .catch(() => undefined);
 
+    void fetch("/api/asr")
+      .then((response) => response.json())
+      .then((asr: { mode?: string; ready?: boolean }) => {
+        if (asr.mode === "whisperlivekit" && asr.ready) setAsrMode("whisperlivekit");
+      })
+      .catch(() => undefined);
+
     const poll = window.setInterval(() => {
       if (publicReady.current) {
         window.clearInterval(poll);
@@ -103,24 +125,43 @@ export function Space() {
       }
     });
     socket.on("space:state", (next: SpaceState) => {
+      spaceRef.current = next;
       setSpace(next);
       setCaptions((current) => mergeSpaceCaptions(current, next.captions));
       setPartial(next.lastPartial);
     });
+    socket.on("asr:fallback", () => {
+      setAsrMode("webspeech");
+    });
     socket.on("caption", (caption: Caption) => {
       if (!caption.isFinal) return;
+      setPartial(null);
       setCaptions((current) => appendCaption(current, caption));
+    });
+    socket.on("caption:live", (caption: Caption) => {
+      setPartial(caption);
+    });
+    socket.on("caption:update", (caption: Caption) => {
+      setCaptions((current) => updateCaption(current, caption));
     });
     socket.on(
       "space:tail",
       (payload: { code?: string; tail?: string; partial?: Caption | null }) => {
-        setPartial(payload.partial ?? (payload.tail ? {
-          id: "host-tail",
-          original: payload.tail,
-          translated: payload.tail,
-          isFinal: false,
-          at: Date.now(),
-        } : null));
+        if (payload.partial) {
+          setPartial(payload.partial);
+          return;
+        }
+        setPartial(
+          payload.tail
+            ? {
+                id: "host-tail",
+                original: payload.tail,
+                translated: payload.tail,
+                isFinal: false,
+                at: Date.now(),
+              }
+            : null,
+        );
       },
     );
 
@@ -129,7 +170,10 @@ export function Space() {
       socket.off("network:public");
       socket.off("space:state");
       socket.off("caption");
+      socket.off("caption:live");
+      socket.off("caption:update");
       socket.off("space:tail");
+      socket.off("asr:fallback");
     };
   }, []);
 
@@ -142,25 +186,37 @@ export function Space() {
   }, [sourceLang, space?.code]);
 
   useEffect(() => {
-    if (!space || !speech.listening) return;
-    speech.stop();
-    void speech.start().then((started) => {
+    if (!space || !listening) return;
+    const restart = useWhisper ? pcm : speech;
+    restart.stop();
+    void restart.start().then((started) => {
       if (started) {
-        getSocket().emit("space:listening", { code: space.code, listening: true });
+        getSocket().emit("space:listening", {
+          code: space.code,
+          listening: true,
+          asr: useWhisper ? "whisperlivekit" : "webspeech",
+        });
       }
     });
+    // Restart capture when the spoken language changes. Hooks are stable enough for this booth control.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLang]);
 
   async function toggle() {
     if (!space) return;
-    if (speech.listening) {
+    if (listening) {
+      pcm.stop();
       speech.stop();
       getSocket().emit("space:listening", { code: space.code, listening: false });
       return;
     }
-    const started = await speech.start();
+    const started = useWhisper ? await pcm.start() : await speech.start();
     if (started) {
-      getSocket().emit("space:listening", { code: space.code, listening: true });
+      getSocket().emit("space:listening", {
+        code: space.code,
+        listening: true,
+        asr: useWhisper ? "whisperlivekit" : "webspeech",
+      });
     }
   }
 
@@ -198,9 +254,10 @@ export function Space() {
             <p className="kicker">Booth space</p>
             <div className="status" style={{ marginTop: 12 }}>
               <span
-                className={`dot ${speech.listening ? "live" : ""}${space?.translateHealth === "down" ? " down" : space?.translateHealth === "degraded" ? " degraded" : ""}`}
+                className={`dot ${listening ? "live" : ""}${space?.translateHealth === "down" ? " down" : space?.translateHealth === "degraded" ? " degraded" : ""}`}
               />
-              {speech.listening ? "Listening to the mixer" : "Ready to listen"}
+              {listening ? "Listening to the mixer" : "Ready to listen"}
+              {useWhisper ? " · Whisper" : ""}
               {` · voice in ${LANGUAGE_LABELS[sourceLang]}`}
               {space ? ` · ${Math.max(space.listenerCount, 0)} listening` : ""}
               {space?.translateHealth === "down"
@@ -238,15 +295,17 @@ export function Space() {
 
             <div className="cta-row">
               <button className="btn" type="button" onClick={toggle} disabled={!space}>
-                {speech.listening ? "Stop" : "Start"}
+                {listening ? "Stop" : "Start"}
               </button>
               {space ? (
                 <button
                   className="btn btn-ghost"
                   type="button"
                   onClick={() => {
+                    pcm.stop();
                     speech.stop();
                     getSocket().emit("space:end", { code: space.code });
+                    spaceRef.current = null;
                     setSpace(null);
                     window.location.href = "/";
                   }}
@@ -256,7 +315,7 @@ export function Space() {
               ) : null}
             </div>
             {setupError ? <p className="error">{setupError}</p> : null}
-            {speech.error ? <p className="error">{speech.error}</p> : null}
+            {listenError ? <p className="error">{listenError}</p> : null}
             {!speech.supported ? (
               <p className="error">Use Chrome or Edge on this computer to capture audio.</p>
             ) : null}

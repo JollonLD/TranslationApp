@@ -9,6 +9,10 @@ export type Caption = {
   translations: Partial<Record<LanguageCode, string>>;
   isFinal: boolean;
   at: number;
+  /** Open re-translating line (not yet frozen). */
+  live?: boolean;
+  /** Detected scripture reference chip, e.g. "João 3:16". */
+  bibleRef?: string;
 };
 
 export type Space = {

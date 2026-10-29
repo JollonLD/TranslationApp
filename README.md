@@ -3,17 +3,17 @@
 No computador da cabine, o **espaço** escuta o áudio da mesa, traduz e mostra um QR. A plateia **escaneia o código** e lê a tradução no navegador do celular — Android ou iPhone, sem instalar aplicativo. Saída **somente texto** (sem áudio TTS).
 
 ```
-Mesa (AUX/LINE) → Chrome (fala) → buffer semântico → tradução gratuita
+Mesa (AUX/LINE) → WhisperLiveKit (escuta) → fita de origem → Riva / NLLB
                                           ↓
                          QR público (Cloudflare)  →  celular (texto)
 ```
 
 ## Pipeline (gratuito)
 
-1. **Escuta** — Web Speech API do Chrome/Edge na cabine (microfone da mesa, sem filtros de ruído).
-2. **Buffer semântico** — junta cláusulas (ponto, vírgula/conectivo, pausa) antes de traduzir; não traduz palavra a palavra.
-3. **Traduz** — até 3 trechos em paralelo (Google Translate → Lingva → MyMemory; DeepL só se `DEEPL_API_KEY` existir). Sem LLM pago.
-4. **Escreve** — publica linhas finais em ordem; o que já saiu **não é reescrito**.
+1. **Escuta** — WhisperLiveKit local (`simulstreaming`, idioma fixo) quando `ASR_BACKEND=whisperlivekit` e o comando `wlk` existe. Se não subir, a cabine volta para a Web Speech API do Chrome/Edge. O microfone da mesa entra sem filtros de ruído.
+2. **Fita de origem** — palavras já confirmadas **não são apagadas**; a ponta instável (`buffer_transcription`) só reescreve a linha aberta.
+3. **Re-tradução ao vivo** — **Riva Translate 4B** atualiza inglês, espanhol e italiano. Persa e urdu passam pelo **NLLB 600M** local; se ele não estiver pronto, cai no Google.
+4. **Caminho lento** — o step-5 (ou `NVIDIA_LLM_MODEL`) só cuida de memória do sermão, versículos e resumo — **não** atrasa a legenda.
 
 ## O que você precisa
 
@@ -32,9 +32,9 @@ No Linux, gere a pasta pronta para o PC da igreja:
 npm run build:win
 ```
 
-Isso cria `dist-windows/` com `ChiesaIlFaro.bat`, Node portátil, a interface e o túnel. Copie **a pasta inteira** para o Windows e dê dois cliques em **`ChiesaIlFaro.bat`**. Uma janela preta deve ficar aberta. O Chrome/Edge abre sozinho. Não precisa instalar Node nem npm nesse computador.
+Isso baixa o Node portátil, o Python embutido, o WhisperLiveKit (CPU), o modelo `small`, o NLLB 600M e o túnel. Cria `dist-windows/`. Copie **a pasta inteira** para o Windows e dê dois cliques em **`ChiesaIlFaro.bat`**. Uma janela preta deve ficar aberta. O Chrome/Edge abre sozinho. Não precisa instalar Node, Python nem pip nesse computador.
 
-O Windows 10/11 já tem o Edge (reconhecimento de fala). Na primeira execução, se o firewall perguntar, escolha **Permitir**.
+O `ChiesaIlFaro.bat` liga o WhisperLiveKit e o NLLB sozinho. Se a pasta `python` não estiver lá, a cabine volta para a Web Speech do Edge. Na primeira execução, se o firewall perguntar, escolha **Permitir**. Coloque `NVIDIA_API_KEY` num arquivo `.env` dentro dessa pasta para inglês, espanhol e italiano.
 
 ## Instalar (primeira vez, no Linux)
 
@@ -87,6 +87,23 @@ Na cabine escolhe-se só a língua falada. Cada celular escolhe em que língua l
 
 Só os idiomas dos celulares conectados são traduzidos (mais rápido). Há um glossário evangélico (livros da Bíblia, referências de versículos, doutrina e culto) em `server/src/churchGlossary.ts`.
 
+### NVIDIA Build (tradução simultânea)
+
+1. Crie uma chave em [build.nvidia.com/settings](https://build.nvidia.com/settings).
+2. Copie `.env.example` para `.env` e preencha:
+
+```bash
+NVIDIA_API_KEY=nvapi-...
+NVIDIA_MT_MODEL=nvidia/riva-translate-4b-instruct-v2
+NVIDIA_LLM_MODEL=stepfun-ai/step-5-preview
+```
+
+3. Reinicie `npm run dev` ou `npm start`. Sem a chave, o app continua só com Google/Lingva.
+
+- **Riva 4B** — caminho rápido das legendas (frase/documento, prompt = par de línguas).
+- **step-5** — memória do sermão, revisão e resumo (fora do caminho ao vivo).
+- Modelos antigos (`meta/llama-3.1-8b-instruct`, etc.) devolvem **HTTP 410**.
+
 ## Estrutura
 
 ```
@@ -96,5 +113,4 @@ web/      Páginas: início, espaço (cabine) e ouvir (celular)
 
 ## Depois desta versão
 
-- Whisper no próprio PC, para entender melhor o sermão
 - Histórico do culto

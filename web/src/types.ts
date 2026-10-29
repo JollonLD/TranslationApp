@@ -9,6 +9,8 @@ export type Caption = {
   translations?: Partial<Record<LanguageCode, string>>;
   isFinal: boolean;
   at: number;
+  live?: boolean;
+  bibleRef?: string;
 };
 
 export type SpaceState = {

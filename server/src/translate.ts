@@ -1,7 +1,6 @@
 /**
- * Free machine translation only (no LLM).
- * Order: Google Translate → DeepL (optional key) → Lingva → MyMemory.
- * Evangelical glossary (Bible books, verses, doctrine) keeps terms consistent.
+ * Fallback MT + slow-path LLM (summary / caption revision).
+ * Fast live path uses rivaTranslate.ts (Riva 4B). Do not block captions on step-5.
  */
 import {
   glossaryExact,
@@ -81,6 +80,15 @@ function prepareSource(text: string, source: LanguageCode) {
   if (out && !/[.?!…]$/.test(out) && out.split(" ").length >= 6) {
     out = `${out}.`;
   }
+  return out;
+}
+
+/** Capitalize and close a committed caption so it reads as a sentence before the model edits it. */
+export function finishSentence(text: string) {
+  let out = text.trim().replace(/\s+/g, " ");
+  if (!out) return out;
+  out = out.charAt(0).toLocaleUpperCase() + out.slice(1);
+  if (!/[.?!…]["'»”)]*$/.test(out)) out = `${out}.`;
   return out;
 }
 
@@ -194,6 +202,327 @@ async function paceGoogle() {
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   // ~12 req/s max — sustains a 1h service without hammering Google
   googleNextAt = Date.now() + 80;
+}
+
+const LANG_NAME: Record<LanguageCode, string> = {
+  pt: "Portuguese (Brazil)",
+  en: "English",
+  es: "Spanish",
+  it: "Italian",
+  fa: "Persian (Farsi)",
+  ur: "Urdu",
+};
+
+const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+/**
+ * Default model that still serves on build.nvidia.com free endpoints (2026).
+ * Older ids like meta/llama-3.1-8b-instruct return HTTP 410 (EOL).
+ * Override with NVIDIA_MODEL.
+ */
+const NVIDIA_DEFAULT_MODEL = "stepfun-ai/step-5-preview";
+let nvidiaPausedUntil = 0;
+/** Serialize slow LLM jobs (summary / revision) — never on the live caption path. */
+let nvidiaTail: Promise<unknown> = Promise.resolve();
+/** Models that returned 404/410 — never retry until process restart. */
+const nvidiaDeadModels = new Set<string>();
+
+function enqueueNvidia<T>(fn: () => Promise<T>): Promise<T> {
+  const run = nvidiaTail.then(fn, fn);
+  nvidiaTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function pauseNvidia(reason: string, ms = 5 * 60_000) {
+  const already = Date.now() < nvidiaPausedUntil;
+  nvidiaPausedUntil = Date.now() + ms;
+  if (health === "ok") health = "degraded";
+  if (!already) {
+    console.warn(
+      `[translate] NVIDIA LLM paused ${Math.round(ms / 60_000)}m (${reason})`,
+    );
+  }
+}
+
+function nvidiaModel(): string | null {
+  const preferred =
+    process.env.NVIDIA_LLM_MODEL?.trim() ||
+    process.env.NVIDIA_MODEL?.trim() ||
+    NVIDIA_DEFAULT_MODEL;
+  if (nvidiaDeadModels.has(preferred)) return null;
+  return preferred;
+}
+
+function extractNvidiaText(message: {
+  content?: string | null;
+  reasoning_content?: string | null;
+}): string {
+  let out = (message.content ?? "").trim();
+  if (out) {
+    return out
+      .replace(/^["'«]+|["'»]+$/g, "")
+      .replace(/^(translation|tradu[cç][aã]o)\s*:\s*/i, "")
+      .trim();
+  }
+  // Reasoning models sometimes only fill reasoning_content when truncated
+  const reasoning = (message.reasoning_content ?? "").trim();
+  if (!reasoning) return "";
+  const finalMark = reasoning.match(/(?:FINAL|Translation)\s*:\s*(.+)$/im);
+  if (finalMark?.[1]) return finalMark[1].trim().replace(/^["']|["']$/g, "");
+  const quoted = [...reasoning.matchAll(/"([^"]{8,200})"/g)].map((m) => m[1]);
+  if (quoted.length) return quoted.at(-1)!.trim();
+  return "";
+}
+
+type NvidiaPolishInput = {
+  text: string;
+  source: LanguageCode;
+  target: LanguageCode;
+  context?: string;
+  draft?: string;
+  priorTranslation?: string;
+};
+
+async function translateNvidiaOnce(
+  key: string,
+  model: string,
+  input: NvidiaPolishInput,
+): Promise<{ text: string | null; status: number; gone: boolean }> {
+  const { text, source, target, context = "", draft = "", priorTranslation = "" } = input;
+
+  const userParts = [
+    context
+      ? `Earlier speech in ${LANG_NAME[source]} (context only — do not retranslate it):\n${context.slice(-900)}\n`
+      : "",
+    priorTranslation
+      ? `What the listener already read in ${LANG_NAME[target]} (keep continuity):\n${priorTranslation.slice(-500)}\n`
+      : "",
+    `New speech in ${LANG_NAME[source]}:\n${text.slice(0, 1200)}\n`,
+    draft
+      ? `Fast draft translation (Google) — fix grammar, meaning, and flow; keep the same ideas:\n${draft.slice(0, 1200)}\n`
+      : "",
+    `Write the final ${LANG_NAME[target]} caption for ONLY the new speech. One natural line for church listeners. No quotes or labels.`,
+  ];
+
+  const response = await fetch(NVIDIA_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a live church interpreter. Google gives a quick draft; you correct it using sermon context so pronouns and ideas make sense. Output ONLY the improved translation of the new part.",
+        },
+        {
+          role: "user",
+          content: userParts.filter(Boolean).join("\n"),
+        },
+      ],
+      max_tokens: 768,
+      temperature: 0.25,
+      top_p: 0.9,
+      stream: false,
+    }),
+    // Quality over speed — user accepts NVIDIA latency for better captions
+    signal: AbortSignal.timeout(45_000),
+  });
+
+  if (response.status === 410 || response.status === 404) {
+    return { text: null, status: response.status, gone: true };
+  }
+  if (!response.ok) {
+    return { text: null, status: response.status, gone: false };
+  }
+
+  const data = (await response.json()) as {
+    choices?: Array<{
+      message?: { content?: string | null; reasoning_content?: string | null };
+    }>;
+  };
+  const out = extractNvidiaText(data.choices?.[0]?.message ?? {});
+  return { text: out || null, status: response.status, gone: false };
+}
+
+/**
+ * NVIDIA polishes Google's draft with rolling sermon context.
+ * Slow is OK — we wait before emitting to listeners.
+ */
+async function polishWithNvidia(input: NvidiaPolishInput): Promise<string | null> {
+  const key = process.env.NVIDIA_API_KEY?.trim();
+  if (!key || key === "$NVIDIA_API_KEY") return null;
+  if (Date.now() < nvidiaPausedUntil) return null;
+  const model = nvidiaModel();
+  if (!model) return null;
+
+  return enqueueNvidia(async () => {
+    if (Date.now() < nvidiaPausedUntil) return null;
+    try {
+      const result = await translateNvidiaOnce(key, model, input);
+
+      if (result.status === 401 || result.status === 403) {
+        pauseNvidia(`auth ${result.status}`);
+        return null;
+      }
+      if (result.status === 429) {
+        pauseNvidia("rate limited", 10 * 60_000);
+        return null;
+      }
+      if (result.gone) {
+        nvidiaDeadModels.add(model);
+        pauseNvidia(`model unavailable ${result.status}`, 30 * 60_000);
+        return null;
+      }
+      if (result.status >= 400) {
+        console.warn(`[translate] NVIDIA HTTP ${result.status} — keeping Google draft`);
+        return null;
+      }
+      return result.text;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // Keep Google draft for this line — do not pause the whole service
+      console.warn(`[translate] NVIDIA polish skipped (${msg}) — keeping Google draft`);
+      return null;
+    }
+  });
+}
+
+/** Last polished line per session+language — helps NVIDIA keep continuity. */
+const priorBySession = new Map<string, string>();
+
+function priorKey(sessionKey: string, target: LanguageCode) {
+  return `${sessionKey}|${target}`;
+}
+
+export function clearTranslateSession(sessionKey: string) {
+  for (const key of [...priorBySession.keys()]) {
+    if (key.startsWith(`${sessionKey}|`)) priorBySession.delete(key);
+  }
+}
+
+export type SummarizeSermonInput = {
+  fullText: string;
+  originalText?: string;
+  lang: LanguageCode;
+};
+
+/**
+ * Short evangelical sermon summary in the listener's language (NVIDIA when configured).
+ */
+export async function summarizeSermon(input: SummarizeSermonInput): Promise<string> {
+  const key = process.env.NVIDIA_API_KEY?.trim();
+  const model = nvidiaModel();
+  const lang = LANG_NAME[input.lang];
+  const body = input.fullText.trim().slice(0, 14_000);
+  if (!body) return "";
+
+  if (!key || key === "$NVIDIA_API_KEY" || !model || Date.now() < nvidiaPausedUntil) {
+    return fallbackSermonSummary(body, input.lang);
+  }
+
+  const polished = await enqueueNvidia(async () => {
+    if (Date.now() < nvidiaPausedUntil) return null;
+    try {
+      const response = await fetch(NVIDIA_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You summarize evangelical church sermons for listeners who followed live captions. Write clear, faithful points. No fluff, no invented verses.",
+            },
+            {
+              role: "user",
+              content: [
+                `Write a short summary of this ministry/sermon in ${lang}.`,
+                "Include: main theme, 3–6 key points, any Bible references mentioned, and a short closing takeaway.",
+                "Use plain paragraphs or short bullets. Output ONLY the summary.",
+                "",
+                "Translated captions:",
+                body,
+                input.originalText?.trim()
+                  ? `\nOriginal speech (reference):\n${input.originalText.trim().slice(0, 6000)}`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            },
+          ],
+          max_tokens: 1200,
+          temperature: 0.3,
+          top_p: 0.9,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+
+      if (response.status === 410 || response.status === 404) {
+        nvidiaDeadModels.add(model);
+        pauseNvidia(`model unavailable ${response.status}`, 30 * 60_000);
+        return null;
+      }
+      if (response.status === 401 || response.status === 403) {
+        pauseNvidia(`auth ${response.status}`);
+        return null;
+      }
+      if (response.status === 429) {
+        pauseNvidia("rate limited", 10 * 60_000);
+        return null;
+      }
+      if (!response.ok) {
+        console.warn(`[translate] NVIDIA summary HTTP ${response.status}`);
+        return null;
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{
+          message?: { content?: string | null; reasoning_content?: string | null };
+        }>;
+      };
+      return extractNvidiaText(data.choices?.[0]?.message ?? {}) || null;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[translate] NVIDIA summary skipped (${msg})`);
+      return null;
+    }
+  });
+
+  return polished?.trim() || fallbackSermonSummary(body, input.lang);
+}
+
+function fallbackSermonSummary(fullText: string, lang: LanguageCode) {
+  const paragraphs = fullText
+    .split(/\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.split(/\s+/).length >= 8);
+  const picks = paragraphs.filter((_, i) => i % Math.max(1, Math.floor(paragraphs.length / 5)) === 0).slice(0, 5);
+  if (!picks.length) {
+    const words = fullText.split(/\s+/).filter(Boolean).slice(0, 80).join(" ");
+    return words ? `${words}…` : "";
+  }
+  const intro: Record<LanguageCode, string> = {
+    pt: "Resumo automático (sem modelo):",
+    en: "Automatic summary (no model):",
+    es: "Resumen automático (sin modelo):",
+    it: "Riassunto automatico (senza modello):",
+    fa: "خلاصه خودکار (بدون مدل):",
+    ur: "خودکار خلاصہ (بغیر ماڈل):",
+  };
+  return `${intro[lang]}\n\n${picks.map((p) => `• ${p}`).join("\n\n")}`;
 }
 
 async function translateDeepL(
@@ -429,63 +758,304 @@ async function translateMyMemory(
   }
 }
 
+function pickUsable(
+  text: string,
+  source: LanguageCode,
+  target: LanguageCode,
+  candidate: string | null,
+): string | null {
+  if (!candidate) return null;
+  if (!looksBroken(text, candidate, source, target)) return candidate;
+  return candidate; // still prefer imperfect MT over silence
+}
+
+/**
+ * Fast fallback MT (Google first). Does not wait for LLM polish.
+ */
 async function translateWithFallback(
   text: string,
   source: LanguageCode,
   target: LanguageCode,
+  options: TranslateOptions = {},
 ): Promise<string | null> {
-  // 1) Google first (reliable for a full ~1h service) — do not wait on weaker engines
-  try {
-    const google = await translateGoogle(text, source, target);
-    if (google && !looksBroken(text, google, source, target)) return google;
-    if (google) return google; // prefer imperfect MT over leaving Portuguese
-  } catch {
-    /* continue */
-  }
+  const sessionKey = options.sessionKey?.trim() ?? "";
 
-  // 2) Race Lingva + optional DeepL
-  const raced = await Promise.allSettled([
-    translateLingva(text, source, target),
-    translateDeepL(text, source, target),
-  ]);
+  let draft =
+    pickUsable(text, source, target, await translateGoogle(text, source, target).catch(() => null)) ??
+    null;
 
-  let best: string | null = null;
-  let bestScore = -1;
-  let any: string | null = null;
-  for (const result of raced) {
-    if (result.status !== "fulfilled" || !result.value) continue;
-    any = any ?? result.value;
-    const score = scoreCandidate(text, result.value, source, target);
-    if (score > bestScore) {
-      bestScore = score;
-      best = result.value;
+  if (!draft) {
+    const raced = await Promise.allSettled([
+      translateLingva(text, source, target),
+      translateDeepL(text, source, target),
+    ]);
+    for (const result of raced) {
+      if (result.status === "fulfilled" && result.value) {
+        draft = pickUsable(text, source, target, result.value);
+        if (draft) break;
+      }
     }
   }
-  if (best) return best;
-  if (any) return any;
 
-  // 3) MyMemory last — skipped automatically for 1h after rate limit
-  if (Date.now() < myMemoryPausedUntil) return null;
-  try {
-    const fallback = await translateMyMemory(text, source, target);
-    if (fallback) return fallback;
-  } catch {
-    /* ignore */
+  if (!draft && Date.now() >= myMemoryPausedUntil) {
+    draft = pickUsable(
+      text,
+      source,
+      target,
+      await translateMyMemory(text, source, target).catch(() => null),
+    );
   }
-  return null;
+
+  if (sessionKey && draft) {
+    priorBySession.set(priorKey(sessionKey, target), draft);
+  }
+  return draft;
 }
+
+/** Public Google draft — used for fa/ur on the live path. */
+export async function translateGoogleDraft(
+  text: string,
+  source: LanguageCode,
+  target: LanguageCode,
+): Promise<string | null> {
+  const prepared = prepareSource(text, source);
+  const raw = await translateGoogle(prepared, source, target).catch(() => null);
+  if (!raw) return null;
+  return formatTranslation(polishChurchTerms(raw, target));
+}
+
+export type ReviseCaptionInput = {
+  original: string;
+  draft: string;
+  source: LanguageCode;
+  target: LanguageCode;
+  sermonCard?: string;
+  priorTranslation?: string;
+};
+
+function contentWords(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[.,;:!?…"'“”«»()]/g, "")
+    .split(/\s+/)
+    .filter((word) => word.length > 2);
+}
+
+function keepsMeaning(before: string, after: string) {
+  const sourceWords = contentWords(before);
+  if (!after.trim()) return false;
+  if (sourceWords.length < 3) return after.length < Math.max(before.length * 3, 80);
+  const translated = new Set(contentWords(after));
+  const kept = sourceWords.filter((word) => translated.has(word)).length;
+  return kept / sourceWords.length >= 0.55;
+}
+
+function parseLangLines(raw: string, allowed: LanguageCode[]) {
+  const text = raw.replace(/```[a-z]*|```/gi, " ").trim();
+  const found: Partial<Record<LanguageCode, string>> = {};
+  for (const line of text.split(/\n+/)) {
+    const match = line.trim().match(/^(pt|en|es|it|fa|ur)\s*[:：-]\s*(.+)$/i);
+    if (!match) continue;
+    const lang = match[1].toLowerCase() as LanguageCode;
+    if (!allowed.includes(lang)) continue;
+    found[lang] = match[2].trim().replace(/^["']|["']$/g, "");
+  }
+  return found;
+}
+
+/**
+ * Turn one frozen caption into complete sentences: punctuation and capitalization.
+ * Rejects a rewrite that drops the speaker's words.
+ */
+export async function shapeSentencesWithLlm(input: {
+  source: LanguageCode;
+  drafts: Partial<Record<LanguageCode, string>>;
+}): Promise<Partial<Record<LanguageCode, string>> | null> {
+  const key = process.env.NVIDIA_API_KEY?.trim();
+  const model = nvidiaModel();
+  if (!key || key === "$NVIDIA_API_KEY" || !model || Date.now() < nvidiaPausedUntil) {
+    return null;
+  }
+
+  const langs = (Object.keys(input.drafts) as LanguageCode[]).filter((lang) => input.drafts[lang]);
+  if (!langs.length) return null;
+
+  const body = langs
+    .map((lang) => `${lang}: ${input.drafts[lang]}`)
+    .join("\n");
+
+  return enqueueNvidia(async () => {
+    if (Date.now() < nvidiaPausedUntil) return null;
+    try {
+      const response = await fetch(NVIDIA_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You punctuate live sermon captions. Add capitalization, commas, and final punctuation so each line is one or two complete sentences. Do not add facts, do not summarize, do not omit ideas, do not translate into a different language than the line you were given. Output one line per language, exactly as `code: sentence`. No markdown.",
+            },
+            { role: "user", content: body },
+          ],
+          max_tokens: 500,
+          temperature: 0.2,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+
+      if (response.status === 410 || response.status === 404) {
+        nvidiaDeadModels.add(model);
+        pauseNvidia(`model unavailable ${response.status}`, 30 * 60_000);
+        return null;
+      }
+      if (response.status === 401 || response.status === 403) {
+        pauseNvidia(`auth ${response.status}`);
+        return null;
+      }
+      if (response.status === 429) {
+        pauseNvidia("rate limited", 10 * 60_000);
+        return null;
+      }
+      if (!response.ok) return null;
+
+      const data = (await response.json()) as {
+        choices?: Array<{
+          message?: { content?: string | null; reasoning_content?: string | null };
+        }>;
+      };
+      const message = data.choices?.[0]?.message ?? {};
+      const raw = `${message.content ?? ""}\n${message.reasoning_content ?? ""}`;
+      const parsed = parseLangLines(raw, langs);
+      const sourceDraft = input.drafts[input.source] ?? "";
+      const sourceOut = parsed[input.source];
+      if (!sourceOut || !keepsMeaning(sourceDraft, sourceOut)) return null;
+
+      const accepted: Partial<Record<LanguageCode, string>> = {
+        [input.source]: finishSentence(sourceOut),
+      };
+      for (const lang of langs) {
+        if (lang === input.source) continue;
+        const draft = input.drafts[lang] ?? "";
+        const next = parsed[lang];
+        if (next && keepsMeaning(draft, next)) accepted[lang] = finishSentence(next);
+      }
+      return accepted;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[translate] sentence shape skipped (${msg})`);
+      return null;
+    }
+  });
+}
+
+/** Slow-path: revise one frozen caption with sermon memory (same id on client). */
+export async function reviseCaptionWithLlm(
+  input: ReviseCaptionInput,
+): Promise<string | null> {
+  const key = process.env.NVIDIA_API_KEY?.trim();
+  const model = nvidiaModel();
+  if (!key || key === "$NVIDIA_API_KEY" || !model || Date.now() < nvidiaPausedUntil) {
+    return null;
+  }
+
+  return enqueueNvidia(async () => {
+    if (Date.now() < nvidiaPausedUntil) return null;
+    try {
+      const response = await fetch(NVIDIA_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You revise one live church caption. Keep meaning faithful. Fix pronouns using sermon context. Output ONLY the revised caption.",
+            },
+            {
+              role: "user",
+              content: [
+                input.sermonCard ? `Sermon card:\n${input.sermonCard}\n` : "",
+                input.priorTranslation
+                  ? `Previous caption in ${LANG_NAME[input.target]}:\n${input.priorTranslation.slice(-400)}\n`
+                  : "",
+                `Source (${LANG_NAME[input.source]}):\n${input.original.slice(0, 800)}\n`,
+                `Draft (${LANG_NAME[input.target]}):\n${input.draft.slice(0, 800)}\n`,
+                `Revised ${LANG_NAME[input.target]} caption:`,
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            },
+          ],
+          max_tokens: 400,
+          temperature: 0.25,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(45_000),
+      });
+
+      if (response.status === 410 || response.status === 404) {
+        nvidiaDeadModels.add(model);
+        pauseNvidia(`model unavailable ${response.status}`, 30 * 60_000);
+        return null;
+      }
+      if (response.status === 401 || response.status === 403) {
+        pauseNvidia(`auth ${response.status}`);
+        return null;
+      }
+      if (response.status === 429) {
+        pauseNvidia("rate limited", 10 * 60_000);
+        return null;
+      }
+      if (!response.ok) return null;
+
+      const data = (await response.json()) as {
+        choices?: Array<{
+          message?: { content?: string | null; reasoning_content?: string | null };
+        }>;
+      };
+      const out = extractNvidiaText(data.choices?.[0]?.message ?? {});
+      return out ? formatTranslation(polishChurchTerms(out, input.target)) : null;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[translate] revise skipped (${msg})`);
+      return null;
+    }
+  });
+}
+
+export type TranslateOptions = {
+  /** Prior source speech for coherence (not shown again on captions). */
+  context?: string;
+  /** Space/session id so NVIDIA remembers the last line per language. */
+  sessionKey?: string;
+};
 
 export async function translateText(
   text: string,
   source: LanguageCode,
   target: LanguageCode,
+  options: TranslateOptions = {},
 ): Promise<string> {
   const trimmed = text.trim();
   if (!trimmed) return "";
   if (source === target) return trimmed;
 
   const prepared = prepareSource(trimmed, source);
-  const key = cacheKey(prepared, source, target);
+  const context = (options.context ?? "").trim();
+  const key = cacheKey(`${options.sessionKey ?? ""}|${context}||${prepared}`, source, target);
   const cached = cache.get(key);
   if (cached) return cached;
 
@@ -496,7 +1066,7 @@ export async function translateText(
   }
 
   try {
-    const raw = await translateWithFallback(prepared, source, target);
+    const raw = await translateWithFallback(prepared, source, target, options);
     if (!raw) {
       markFailure();
       return trimmed;
@@ -505,7 +1075,6 @@ export async function translateText(
     const translated = formatTranslation(polishChurchTerms(raw, target));
     markSuccess();
     cache.set(key, translated);
-    // Also cache the raw ASR form so repeats hit immediately
     cache.set(cacheKey(trimmed, source, target), translated);
     return translated;
   } catch {
@@ -518,6 +1087,7 @@ export async function translateMany(
   text: string,
   source: LanguageCode,
   targets: LanguageCode[],
+  options: TranslateOptions = {},
 ): Promise<Partial<Record<LanguageCode, string>>> {
   const translations: Partial<Record<LanguageCode, string>> = {
     [source]: text,
@@ -525,7 +1095,7 @@ export async function translateMany(
   const unique = [...new Set(targets)].filter((lang) => lang !== source);
   await Promise.all(
     unique.map(async (lang) => {
-      translations[lang] = await translateText(text, source, lang);
+      translations[lang] = await translateText(text, source, lang, options);
     }),
   );
   return translations;

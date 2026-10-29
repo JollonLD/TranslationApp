@@ -32,6 +32,15 @@ export function webDistDir() {
   return path.join(resourceDir(), "web", "dist");
 }
 
+/** A bundled relative path (python\\python.exe) or an absolute path on disk. */
+export function resolveTool(bin: string) {
+  if (!bin) return bin;
+  if (path.isAbsolute(bin) && existsSync(bin)) return bin;
+  const beside = path.join(resourceDir(), bin);
+  if (existsSync(beside)) return beside;
+  return bin;
+}
+
 export function cloudflaredPath() {
   const root = resourceDir();
   const windows = path.join(root, "cloudflared.exe");

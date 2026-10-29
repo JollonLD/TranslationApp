@@ -1,9 +1,13 @@
 Chiesa Il Faro for Windows
 
-1. Copy this WHOLE folder to the church computer.
+1. Copy this WHOLE folder to the church computer (Python and models are inside).
 2. Double-click ChiesaIlFaro.bat
 3. A black window must stay open. If it closes, open palavra.log.
 4. If Windows asks about the firewall, choose Allow.
-5. Chrome or Edge should open. Click Start and show the QR.
+5. Chrome or Edge should open. The status line should say Whisper. Click Start and show the QR.
+
+The booth listens with WhisperLiveKit (small) and translates Persian/Urdu with NLLB.
+If python\python.exe is missing, the booth falls back to Chrome speech recognition.
+Put NVIDIA_API_KEY in a .env file in this folder for English, Spanish, and Italian.
 
 Do not move ChiesaIlFaro.bat away from this folder.

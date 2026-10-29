@@ -3,7 +3,7 @@ import path from "node:path";
 import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
-import { installCrashGuard, writeLog } from "./boot.js";
+import { installCrashGuard, loadEnvFile, writeLog } from "./boot.js";
 import { openAppWindow } from "./desktop.js";
 import { firewallHint } from "./firewall.js";
 import { getLanAddresses, localHostname, primaryLanAddress } from "./network.js";
@@ -11,15 +11,19 @@ import { useResourceCwd, webDistDir } from "./paths.js";
 
 installCrashGuard();
 const appRoot = useResourceCwd();
+const envFile = loadEnvFile();
 writeLog(`starting Chiesa Il Faro from ${appRoot}`);
+if (envFile) writeLog(`loaded env from ${envFile}`);
+if (process.env.NVIDIA_API_KEY?.trim()) {
+  writeLog(
+    `NVIDIA fast MT: ${process.env.NVIDIA_MT_MODEL?.trim() || "nvidia/riva-translate-4b-instruct-v2"}; LLM: ${process.env.NVIDIA_LLM_MODEL?.trim() || process.env.NVIDIA_MODEL?.trim() || "stepfun-ai/step-5-preview"}`,
+  );
+}
 import {
-  clearPhraseBuffer,
-  getPhraseBuffer,
-  PAUSE_MS,
-  stripCommittedPrefix,
-  stripOverlappingPrefix,
-} from "./phraseBuffer.js";
-import { clearPipeline, ensurePipeline, type PipelineJob } from "./pipeline.js";
+  clearLiveEngine,
+  ensureLiveEngine,
+  fillMissingLanguages,
+} from "./liveEngine.js";
 import {
   claimHost,
   createSpace,
@@ -33,15 +37,34 @@ import {
   setLanguages,
   setListening,
   setTranslateHealth,
+  updateCaption,
 } from "./spaces.js";
-import { getTranslateHealth, translateMany } from "./translate.js";
+import { closeAsrSession, openAsrSession, writeAsrPcm } from "./asrSession.js";
+import { startNllbWorker } from "./nllbTranslate.js";
+import { buildFullTranscript, buildSermonNotes } from "./sermonNotes.js";
+import { getRivaHealth } from "./rivaTranslate.js";
+import { clearTranslateSession, getTranslateHealth } from "./translate.js";
+import { getAsrStatus, startWhisperSidecar } from "./whisperSidecar.js";
 import { startPublicTunnel } from "./tunnel.js";
 import { isLanguage, type Caption, type LanguageCode, type Space } from "./types.js";
 
 let publicBaseUrl = "";
 
+function isUsablePublicBase(base: string) {
+  try {
+    const host = new URL(base).hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1") return false;
+    if (host === "api.trycloudflare.com" || host === "www.trycloudflare.com") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function viewerLink(code: string) {
-  if (publicBaseUrl) return `${publicBaseUrl.replace(/\/$/, "")}/ouvir/${code}`;
+  if (publicBaseUrl && isUsablePublicBase(publicBaseUrl)) {
+    return `${publicBaseUrl.replace(/\/$/, "")}/ouvir/${code}`;
+  }
   return `http://${primaryLanAddress()}:${listenPort}/ouvir/${code}`;
 }
 
@@ -55,6 +78,10 @@ app.use(express.json());
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/api/asr", (_req, res) => {
+  res.json(getAsrStatus());
 });
 
 app.get("/api/network", (_req, res) => {
@@ -121,30 +148,20 @@ function listenerTargets(code: string): LanguageCode[] {
 }
 
 async function fillTranslations(space: Space, langs: LanguageCode[], limit = 80) {
-  const targets = langs.filter((lang) => lang !== space.sourceLang);
-  if (!targets.length) return false;
-  const recent = space.captions.slice(-limit);
-  let changed = false;
-  await Promise.all(
-    recent.map(async (caption) => {
-      const missing = targets.filter((lang) => !caption.translations[lang]);
-      if (!missing.length) return;
-      Object.assign(caption.translations, await translateMany(caption.original, space.sourceLang, missing));
-      if (!caption.translated) {
-        const first = missing.find((lang) => caption.translations[lang]);
-        if (first && caption.translations[first]) {
-          caption.translated = caption.translations[first]!;
-        }
-      }
-      changed = true;
-    }),
-  );
+  const changed = await fillMissingLanguages(space.captions, space.sourceLang, langs, limit);
   syncTranslateHealth(space);
   return changed;
 }
 
 function syncTranslateHealth(space: Space) {
-  const health = getTranslateHealth();
+  const fallback = getTranslateHealth();
+  const riva = getRivaHealth();
+  const health =
+    riva === "down" && fallback === "down"
+      ? "down"
+      : riva === "degraded" || fallback === "degraded"
+        ? "degraded"
+        : "ok";
   if (space.translateHealth !== health) {
     setTranslateHealth(space, health);
     return true;
@@ -152,253 +169,74 @@ function syncTranslateHealth(space: Space) {
   return false;
 }
 
-function pipelineFor(code: string) {
-  return ensurePipeline(code, {
-    // Stage 2 — translate (up to 3 jobs in parallel)
-    translate: async (job: PipelineJob) => {
-      try {
-        const translations = await translateMany(job.text, job.sourceLang, job.targets);
-        return makeCaption(job.text, translations, true, job.seq);
-      } catch (error) {
-        console.warn("[pipeline] translate failed, emitting source text:", error);
-        const fallback: Caption["translations"] = { [job.sourceLang]: job.text };
-        for (const lang of job.targets) {
-          if (lang !== job.sourceLang) fallback[lang] = job.text;
-        }
-        return makeCaption(job.text, fallback, true, job.seq);
-      }
+function mergeLivePartial(space: Space, caption: Caption) {
+  const prev = space.lastPartial;
+  if (prev && prev.id === caption.id) {
+    const translations = { ...prev.translations, ...caption.translations };
+    for (const [lang, value] of Object.entries(caption.translations)) {
+      if (!value) delete translations[lang as LanguageCode];
+    }
+    space.lastPartial = {
+      ...prev,
+      ...caption,
+      translations,
+      translated: caption.translated || prev.translated,
+      original: caption.original || prev.original,
+    };
+  } else {
+    setHostTail(space, caption.original);
+    space.lastPartial = caption;
+  }
+  return space.lastPartial!;
+}
+
+function engineFor(code: string) {
+  return ensureLiveEngine(code, {
+    getSourceLang: () => getSpace(code)?.sourceLang ?? "pt",
+    getTargets: () => {
+      const space = getSpace(code);
+      const requested = listenerTargets(code);
+      if (requested.length) return requested;
+      return space ? [space.targetLang] : ["en"];
     },
-    // Stage 3 — write in order; never rewrites prior captions
-    write: (caption) => {
+    onLive: (caption) => {
+      const live = getSpace(code);
+      if (!live) return;
+      const merged = mergeLivePartial(live, caption);
+      io.to(roomName(live.code)).emit("caption:live", merged);
+      io.to(roomName(live.code)).emit("space:tail", {
+        code: live.code,
+        tail: merged.original,
+        partial: merged,
+      });
+      if (syncTranslateHealth(live)) emitSpace(live.code);
+    },
+    onUpdate: (caption) => {
+      const live = getSpace(code);
+      if (!live) return;
+      const updated = updateCaption(live, caption);
+      io.to(roomName(live.code)).emit("caption:update", updated);
+    },
+    onFinal: (caption) => {
       const live = getSpace(code);
       if (!live) return;
       pushCaption(live, caption);
-      const healthChanged = syncTranslateHealth(live);
+      setHostTail(live, "");
       io.to(roomName(live.code)).emit("caption", caption);
-      if (healthChanged) emitSpace(live.code);
+      io.to(roomName(live.code)).emit("space:tail", {
+        code: live.code,
+        tail: "",
+        partial: null,
+      });
+      if (syncTranslateHealth(live)) emitSpace(live.code);
     },
   });
 }
 
-const COALESCE_MS = 350;
-const COALESCE_MAX_WORDS = 28;
-const END_SENTENCE = /[.?!…]$/;
-
-type CoalesceBucket = {
-  parts: string[];
-  sourceLang: LanguageCode;
-  targets: LanguageCode[];
-  timer: ReturnType<typeof setTimeout> | null;
-};
-
-const coalesceBuckets = new Map<string, CoalesceBucket>();
-
-function wordCount(text: string) {
-  return text.split(" ").filter(Boolean).length;
-}
-
-/** Join coalesce parts without repeating overlapping ASR fragments. */
-function mergeCoalesceParts(parts: string[]): string {
-  let out = "";
-  for (const part of parts) {
-    const next = part.trim().replace(/\s+/g, " ");
-    if (!next) continue;
-    if (!out) {
-      out = next;
-      continue;
-    }
-    const outKey = out.toLowerCase();
-    const nextKey = next.toLowerCase();
-    if (outKey === nextKey || outKey.includes(nextKey)) continue;
-    if (nextKey.includes(outKey)) {
-      out = next;
-      continue;
-    }
-    const remainder = stripOverlappingPrefix(next, out);
-    if (!remainder) continue;
-    out = `${out} ${remainder}`.replace(/\s+/g, " ").trim();
-  }
-  return out;
-}
-
-/** Text already sent to the translate pipeline this session (coalesce-level cursor). */
-const releasedToPipeline = new Map<string, string>();
-
-function flushCoalesce(code: string) {
-  const bucket = coalesceBuckets.get(code);
-  if (!bucket) return;
-  if (bucket.timer) clearTimeout(bucket.timer);
-  coalesceBuckets.delete(code);
-  let text = mergeCoalesceParts(bucket.parts);
-  if (!text) return;
-
-  const space = getSpace(code);
-  if (!space) return;
-
-  // Pipeline cursor: never re-send what this space already translated
-  const already = releasedToPipeline.get(code) ?? "";
-  text = stripCommittedPrefix(text, already);
-  if (!text) return;
-  text = stripOverlappingPrefix(text, already);
-  if (!text) return;
-
-  const last = space.captions.at(-1);
-  if (last?.isFinal) {
-    const prev = last.original.trim().toLowerCase();
-    const next = text.toLowerCase();
-    if (prev === next || prev.includes(next)) return;
-  }
-
-  releasedToPipeline.set(code, [already, text].filter(Boolean).join(" ").replace(/\s+/g, " ").trim());
-  const piped = releasedToPipeline.get(code) ?? "";
-  const pipedWords = piped.split(" ").filter(Boolean);
-  if (pipedWords.length > 400) {
-    releasedToPipeline.set(code, pipedWords.slice(-200).join(" "));
-  }
-
-  pipelineFor(code).hear(text, bucket.sourceLang, bucket.targets);
-}
-
-/** Merge short commits so listeners get cohesive clauses, not fragments. */
-function enqueueCoalesce(space: Space, text: string, targets: LanguageCode[]) {
-  const code = space.code;
-  let trimmed = text.trim().replace(/\s+/g, " ");
-  if (!trimmed) return;
-
-  // Drop anything already sent to translate
-  const already = releasedToPipeline.get(code) ?? "";
-  trimmed = stripCommittedPrefix(trimmed, already);
-  trimmed = stripOverlappingPrefix(trimmed, already);
-  if (!trimmed) return;
-
-  let bucket = coalesceBuckets.get(code);
-  if (!bucket) {
-    bucket = {
-      parts: [],
-      sourceLang: space.sourceLang,
-      targets,
-      timer: null,
-    };
-    coalesceBuckets.set(code, bucket);
-  } else {
-    bucket.sourceLang = space.sourceLang;
-    const merged = new Set([...bucket.targets, ...targets]);
-    bucket.targets = [...merged];
-  }
-
-  const lastPart = bucket.parts.at(-1);
-  if (!lastPart || lastPart.toLowerCase() !== trimmed.toLowerCase()) {
-    bucket.parts.push(trimmed);
-  }
-
-  const joined = mergeCoalesceParts(bucket.parts);
-  const shouldFlushNow =
-    END_SENTENCE.test(joined) || wordCount(joined) >= COALESCE_MAX_WORDS;
-
-  if (bucket.timer) {
-    clearTimeout(bucket.timer);
-    bucket.timer = null;
-  }
-
-  if (shouldFlushNow) {
-    flushCoalesce(code);
-    return;
-  }
-
-  bucket.timer = setTimeout(() => {
-    flushCoalesce(code);
-  }, COALESCE_MS);
-}
-
-/** Stage 1 — listen: coalesce → parallel translate → ordered write */
-function hearPhrase(space: Space, text: string, options?: { allowSingle?: boolean }) {
-  const trimmed = text.trim().replace(/\s+/g, " ");
-  if (!trimmed) return;
-  const words = trimmed.split(" ").filter(Boolean).length;
-  if (words < 2 && !options?.allowSingle) return;
-  const requested = listenerTargets(space.code);
-  const targets = requested.length ? requested : [space.targetLang];
-  enqueueCoalesce(space, trimmed, targets);
-}
-
-const pauseTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-function armPauseFlush(code: string, delayMs = PAUSE_MS) {
-  const previous = pauseTimers.get(code);
-  if (previous) clearTimeout(previous);
-  pauseTimers.set(
-    code,
-    setTimeout(() => {
-      pauseTimers.delete(code);
-      const space = getSpace(code);
-      if (!space || !space.listening) return;
-      const buffer = getPhraseBuffer(code);
-      const snapshot = buffer.drainPause();
-      if (snapshot.tail !== space.hostTail) {
-        setHostTail(space, snapshot.tail);
-        io.to(roomName(space.code)).emit("space:tail", {
-          code: space.code,
-          tail: space.hostTail,
-          partial: space.lastPartial,
-        });
-      }
-      for (const commit of snapshot.commits) {
-        hearPhrase(space, commit.text, { allowSingle: true });
-      }
-      if (!buffer.hasPending()) return;
-      const since = buffer.msSinceLastInput();
-      if (since < PAUSE_MS) {
-        // Silence window not met yet (e.g. late re-arm) — wait the remainder
-        armPauseFlush(code, Math.max(40, PAUSE_MS - since + 20));
-        return;
-      }
-      // Silence ok but remnant too short for pause rules — force out (1-word tails)
-      const forced = buffer.flushAll();
-      if (forced.tail !== space.hostTail) {
-        setHostTail(space, forced.tail);
-        io.to(roomName(space.code)).emit("space:tail", {
-          code: space.code,
-          tail: space.hostTail,
-          partial: space.lastPartial,
-        });
-      }
-      for (const commit of forced.commits) {
-        hearPhrase(space, commit.text, { allowSingle: true });
-      }
-    }, delayMs),
-  );
-}
-
 function clearSpaceBuffers(code: string) {
-  const timer = pauseTimers.get(code);
-  if (timer) clearTimeout(timer);
-  pauseTimers.delete(code);
-  const coalesce = coalesceBuckets.get(code);
-  if (coalesce?.timer) clearTimeout(coalesce.timer);
-  coalesceBuckets.delete(code);
-  releasedToPipeline.delete(code);
-  clearPhraseBuffer(code);
-  clearPipeline(code);
-}
-
-function makeCaption(
-  text: string,
-  translations: Caption["translations"],
-  isFinal: boolean,
-  seq?: number,
-): Caption {
-  const preferred =
-    Object.values(translations).find((value) => value && value !== text) ||
-    translations.en ||
-    text;
-  return {
-    id: `c${seq ?? Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    original: text,
-    translations,
-    translated: preferred || text,
-    isFinal,
-    at: Date.now(),
-  };
+  closeAsrSession(code);
+  clearTranslateSession(code);
+  clearLiveEngine(code);
 }
 
 io.on("connection", (socket) => {
@@ -484,6 +322,41 @@ io.on("connection", (socket) => {
   );
 
   socket.on(
+    "space:notes",
+    (
+      payload: { code: string; lang?: LanguageCode; summarize?: boolean },
+      ack?: (result: unknown) => void,
+    ) => {
+      const space = getSpace(payload?.code ?? "");
+      const lang = isLanguage(payload?.lang)
+        ? payload.lang
+        : isLanguage(socket.data.targetLang)
+          ? socket.data.targetLang
+          : "en";
+      if (!space) {
+        ack?.({ ok: false, error: "This space does not exist or has already ended." });
+        return;
+      }
+
+      void (async () => {
+        try {
+          await fillTranslations(space, [lang]);
+          if (payload?.summarize) {
+            const notes = await buildSermonNotes(space, lang);
+            ack?.(notes);
+            return;
+          }
+          const transcript = buildFullTranscript(space, lang);
+          ack?.({ ok: true, ...transcript, summary: "" });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : "Could not build notes.";
+          ack?.({ ok: false, error: msg });
+        }
+      })();
+    },
+  );
+
+  socket.on(
     "space:languages",
     (payload: { code: string; sourceLang: LanguageCode; targetLang?: LanguageCode }) => {
       const space = getSpace(payload.code);
@@ -493,28 +366,39 @@ io.on("connection", (socket) => {
     },
   );
 
-  socket.on("space:listening", (payload: { code: string; listening: boolean }) => {
+  socket.on("space:listening", (payload: { code: string; listening: boolean; asr?: string }) => {
     const space = getSpace(payload.code);
     if (!space || space.hostId !== socket.id) return;
     setListening(space, payload.listening);
     if (!payload.listening) {
-      const leftover = getPhraseBuffer(space.code).flushAll();
-      for (const commit of leftover.commits) {
-        hearPhrase(space, commit.text, { allowSingle: true });
-      }
-      flushCoalesce(space.code);
-      clearPhraseBuffer(space.code);
-      releasedToPipeline.delete(space.code);
-      const timer = pauseTimers.get(space.code);
-      if (timer) clearTimeout(timer);
-      pauseTimers.delete(space.code);
+      closeAsrSession(space.code);
+      engineFor(space.code).stop();
+      clearLiveEngine(space.code);
+      clearTranslateSession(space.code);
       setHostTail(space, "");
     } else {
-      // Fresh listen session — new commit cursor
-      clearPhraseBuffer(space.code);
-      releasedToPipeline.delete(space.code);
+      clearLiveEngine(space.code);
+      clearTranslateSession(space.code);
+      engineFor(space.code);
+      if (payload.asr === "whisperlivekit") {
+        const opened = openAsrSession(space.code, space.sourceLang, (text, isFinal) => {
+          const live = getSpace(space.code);
+          if (!live || live.hostId !== socket.id) return;
+          engineFor(space.code).push(text, isFinal);
+        });
+        if (!opened) {
+          socket.emit("asr:fallback", { reason: "WhisperLiveKit is not ready." });
+        }
+      }
     }
     emitSpace(space.code);
+  });
+
+  socket.on("asr:pcm", (code: string, pcm: Buffer | ArrayBuffer) => {
+    const space = getSpace(code ?? "");
+    if (!space || space.hostId !== socket.id || !space.listening) return;
+    if (!pcm) return;
+    writeAsrPcm(space.code, pcm);
   });
 
   socket.on(
@@ -526,25 +410,7 @@ io.on("connection", (socket) => {
       const text = payload.text?.trim() ?? "";
       if (!text && !payload.isFinal) return;
 
-      const buffer = getPhraseBuffer(space.code);
-      const snapshot = buffer.push(text, Boolean(payload.isFinal));
-
-      if (snapshot.tail !== space.hostTail) {
-        setHostTail(space, snapshot.tail);
-        io.to(roomName(space.code)).emit("space:tail", {
-          code: space.code,
-          tail: space.hostTail,
-          partial: space.lastPartial,
-        });
-      }
-
-      for (const commit of snapshot.commits) {
-        hearPhrase(space, commit.text);
-      }
-
-      // Always wait full pause window so drainPause can succeed, then re-arm if needed
-      armPauseFlush(space.code, PAUSE_MS);
-
+      engineFor(space.code).push(text, Boolean(payload.isFinal));
       if (syncTranslateHealth(space)) emitSpace(space.code);
     },
   );
@@ -561,6 +427,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     const released = releaseHost(socket.id);
     if (released) {
+      closeAsrSession(released.code);
       clearSpaceBuffers(released.code);
       emitSpace(released.code);
     }
@@ -600,15 +467,20 @@ function startListening(port: number, attempt = 0) {
 
     const tunnel = startPublicTunnel(port);
     void tunnel.ready.then((url) => {
-      if (url) {
+      if (url && isUsablePublicBase(url)) {
         publicBaseUrl = url;
         console.log(`  Public QR:      ${url}\n`);
         io.emit("network:public", { publicBaseUrl: url });
         return;
+      }
+      if (url) {
+        console.warn(`  Ignored invalid tunnel URL: ${url}`);
       }
       console.log(`  Public link unavailable. The QR will use the local address.\n`);
     });
   });
 }
 
+void startWhisperSidecar();
+startNllbWorker();
 startListening(PORT);

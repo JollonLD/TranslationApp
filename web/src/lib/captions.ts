@@ -1,19 +1,13 @@
 import type { Caption } from "../types";
 
 function mergeCaption(current: Caption, incoming: Caption): Caption {
-  // Final captions are immutable in wording — only merge missing translations
-  if (current.isFinal) {
-    return {
-      ...current,
-      translations: { ...incoming.translations, ...current.translations },
-      translated: current.translated || incoming.translated,
-    };
-  }
   return {
     ...current,
     ...incoming,
     translations: { ...current.translations, ...incoming.translations },
     translated: incoming.translated || current.translated,
+    original: incoming.original || current.original,
+    bibleRef: incoming.bibleRef || current.bibleRef,
   };
 }
 
@@ -25,7 +19,7 @@ export function appendCaption(list: Caption[], caption: Caption): Caption[] {
     return next;
   }
   const last = list.at(-1);
-  if (last && last.isFinal) {
+  if (last && last.isFinal && caption.isFinal) {
     const a = last.original.trim().toLowerCase();
     const b = caption.original.trim().toLowerCase();
     if (a === b || (a.includes(b) && b.split(/\s+/).length <= a.split(/\s+/).length)) {
@@ -34,8 +28,15 @@ export function appendCaption(list: Caption[], caption: Caption): Caption[] {
       return next;
     }
   }
-  // Never replace a final line with a different wording — always append
   return [...list, caption];
+}
+
+export function updateCaption(list: Caption[], caption: Caption): Caption[] {
+  const existingIndex = list.findIndex((item) => item.id === caption.id);
+  if (existingIndex < 0) return appendCaption(list, caption);
+  const next = [...list];
+  next[existingIndex] = mergeCaption(next[existingIndex], caption);
+  return next;
 }
 
 export function mergeSpaceCaptions(current: Caption[], incoming: Caption[]): Caption[] {
@@ -45,7 +46,6 @@ export function mergeSpaceCaptions(current: Caption[], incoming: Caption[]): Cap
     return prev ? mergeCaption(prev, item) : item;
   });
 
-  // Keep any local finals the snapshot hasn't caught up with yet
   const seen = new Set(mergedIncoming.map((item) => item.id));
   const extras = current.filter((item) => item.isFinal && !seen.has(item.id));
   if (!extras.length) return mergedIncoming;
