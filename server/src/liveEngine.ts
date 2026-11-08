@@ -71,6 +71,19 @@ async function localOrGoogle(
   return translateGoogleDraft(text, source, target);
 }
 
+/** One caption line into a listener language. Skips a result that is still the source. */
+async function translateHistorical(text: string, source: LanguageCode, target: LanguageCode) {
+  let out: string | null = null;
+  if (rivaCanPivot(source, target)) out = await translateRiva(text, source, target);
+  if (!out) {
+    const many = await translateMany(text, source, [target]);
+    out = many[target] ?? null;
+  }
+  const trimmed = out?.trim() ?? "";
+  if (!trimmed || trimmed === text.trim()) return null;
+  return trimmed;
+}
+
 export class LiveEngine {
   private readonly code: string;
   private readonly hooks: LiveEngineHooks;
@@ -113,6 +126,14 @@ export class LiveEngine {
     const snap = tape.flushAll();
     this.handleSnapshot(snap);
     this.clearSilence();
+  }
+
+  /** Listener switched language: translate the line that is still open. */
+  retarget() {
+    if (this.closed) return;
+    const open = (this.liveOriginal || getSourceTape(this.code).getOpenText()).trim();
+    if (!open) return;
+    this.scheduleTranslate(open, false);
   }
 
   clear() {
@@ -393,6 +414,16 @@ export class LiveEngine {
       translations[lang] = text;
     }
 
+    const late = this.hooks.getTargets().filter((lang) => lang !== source && !translations[lang]);
+    if (late.length) {
+      const extra = await Promise.all(
+        late.map(async (lang) => [lang, await translateHistorical(original, source, lang)] as const),
+      );
+      for (const [lang, text] of extra) {
+        if (text) translations[lang] = polishChurchTerms(text, lang);
+      }
+    }
+
     const hits = detectBibleRefs(original);
     let bibleRef: string | undefined;
     if (hits[0]) {
@@ -484,7 +515,7 @@ export function clearLiveEngine(code: string) {
   engines.delete(code);
 }
 
-/** Fill missing languages on historical finals when a new listener joins. */
+/** Fill missing languages on historical finals when a listener joins or switches language. */
 export async function fillMissingLanguages(
   captions: Caption[],
   source: LanguageCode,
@@ -492,36 +523,24 @@ export async function fillMissingLanguages(
   limit = 80,
 ) {
   const targets = langs.filter((l) => l !== source);
-  if (!targets.length) return false;
-  let changed = false;
+  if (!targets.length) return [];
+  const updated: Caption[] = [];
   const recent = captions.filter((c) => c.isFinal).slice(-limit);
   await Promise.all(
     recent.map(async (caption) => {
-      const missing = targets.filter((lang) => !caption.translations[lang]);
+      const missing = targets.filter((lang) => !caption.translations[lang]?.trim());
       if (!missing.length) return;
-      const viaRiva: LanguageCode[] = [];
-      const viaGoogle: LanguageCode[] = [];
-      for (const lang of missing) {
-        if (rivaCanPivot(source, lang)) viaRiva.push(lang);
-        else viaGoogle.push(lang);
-      }
+      let touched = false;
       await Promise.all(
-        viaRiva.map(async (lang) => {
-          const out = await translateRiva(caption.original, source, lang);
-          if (out) {
-            caption.translations[lang] = out;
-            changed = true;
-          }
+        missing.map(async (lang) => {
+          const out = await translateHistorical(caption.original, source, lang);
+          if (!out) return;
+          caption.translations[lang] = out;
+          touched = true;
         }),
       );
-      if (viaGoogle.length) {
-        Object.assign(
-          caption.translations,
-          await translateMany(caption.original, source, viaGoogle),
-        );
-        changed = true;
-      }
+      if (touched) updated.push(caption);
     }),
   );
-  return changed;
+  return updated;
 }

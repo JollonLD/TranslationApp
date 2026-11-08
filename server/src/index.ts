@@ -41,7 +41,7 @@ import {
 } from "./spaces.js";
 import { closeAsrSession, openAsrSession, writeAsrPcm } from "./asrSession.js";
 import { startNllbWorker } from "./nllbTranslate.js";
-import { buildFullTranscript, buildSermonNotes } from "./sermonNotes.js";
+import { buildFullTranscript, buildSermonNotes, notesMessage } from "./sermonNotes.js";
 import { getRivaHealth } from "./rivaTranslate.js";
 import { clearTranslateSession, getTranslateHealth } from "./translate.js";
 import { getAsrStatus, startWhisperSidecar } from "./whisperSidecar.js";
@@ -148,9 +148,12 @@ function listenerTargets(code: string): LanguageCode[] {
 }
 
 async function fillTranslations(space: Space, langs: LanguageCode[], limit = 80) {
-  const changed = await fillMissingLanguages(space.captions, space.sourceLang, langs, limit);
+  const updated = await fillMissingLanguages(space.captions, space.sourceLang, langs, limit);
   syncTranslateHealth(space);
-  return changed;
+  for (const caption of updated) {
+    io.to(roomName(space.code)).emit("caption:update", caption);
+  }
+  return updated;
 }
 
 function syncTranslateHealth(space: Space) {
@@ -268,7 +271,14 @@ io.on("connection", (socket) => {
     ) => {
       const space = getSpace(payload?.code ?? "");
       if (!space) {
-        ack?.({ ok: false, error: "This space does not exist or has already ended." });
+        const lang = isLanguage(payload?.targetLang) ? payload.targetLang : "en";
+        ack?.({
+          ok: false,
+          error:
+            payload?.role === "host"
+              ? "This space does not exist or has already ended."
+              : notesMessage(lang, "missingSpace"),
+        });
         return;
       }
 
@@ -290,8 +300,8 @@ io.on("connection", (socket) => {
       });
 
       if (socket.data.role === "listener") {
-        void fillTranslations(space, [socket.data.targetLang]).then((changed) => {
-          if (changed) emitSpace(space.code);
+        void fillTranslations(space, [socket.data.targetLang]).then((updated) => {
+          if (updated.length) emitSpace(space.code);
         });
       }
     },
@@ -312,6 +322,7 @@ io.on("connection", (socket) => {
       socket.data.role = socket.data.role ?? "listener";
       socket.data.targetLang = payload.lang;
       void fillTranslations(space, [payload.lang]).then(() => {
+        engineFor(space.code).retarget();
         emitSpace(space.code);
         ack?.({
           ok: true,
@@ -334,7 +345,7 @@ io.on("connection", (socket) => {
           ? socket.data.targetLang
           : "en";
       if (!space) {
-        ack?.({ ok: false, error: "This space does not exist or has already ended." });
+        ack?.({ ok: false, error: notesMessage(lang, "missingSpace") });
         return;
       }
 
@@ -349,7 +360,7 @@ io.on("connection", (socket) => {
           const transcript = buildFullTranscript(space, lang);
           ack?.({ ok: true, ...transcript, summary: "" });
         } catch (error) {
-          const msg = error instanceof Error ? error.message : "Could not build notes.";
+          const msg = error instanceof Error ? error.message : notesMessage(lang, "failed");
           ack?.({ ok: false, error: msg });
         }
       })();

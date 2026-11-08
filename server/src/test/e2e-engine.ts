@@ -11,6 +11,7 @@ import { polishChurchTerms, prepareChurchSource } from "../churchGlossary.js";
 import {
   clearLiveEngine,
   ensureLiveEngine,
+  fillMissingLanguages,
   type LiveEngineHooks,
 } from "../liveEngine.js";
 import { rivaCanPivot, rivaSupportsDirect } from "../rivaTranslate.js";
@@ -213,6 +214,46 @@ function testTapeRevisionDoesNotDuplicate() {
   assert(!open.includes("funciona agora"), "corrected line is not appended twice");
   const count = open.split("agora parece").length - 1;
   assertEq(count, 1, "phrase appears once");
+}
+
+function testTapeLoggedRevisionsDoNotDuplicate() {
+  console.log("\n[SourceTape] real booth revisions stay a single line");
+  const sequences = [
+    [
+      "agora parece",
+      "agora parece que",
+      "agora parece que tá",
+      "agora parece que tá funciona",
+      "agora parece que tá funcionando",
+      "agora parece que tá funcionando certo não sei",
+    ],
+    [
+      "agora a tradução",
+      "agora a tradução tá",
+      "agora a tradução tá duplica",
+      "agora a tradução tá duplicada",
+    ],
+    [
+      "quando eu falo",
+      "quando eu falo não",
+      "quando eu falo inglês",
+      "quando eu falo inglês ele fica duplicado",
+    ],
+    ["testa", "testando", "testando para ver se duplica o áudio"],
+  ];
+  for (const lines of sequences) {
+    const tape = new SourceTape();
+    let t = 90_000;
+    for (const line of lines) {
+      t += 180;
+      tape.push(line, false, t);
+    }
+    const open = tape.getOpenText();
+    assertEq(open, lines.at(-1)!, "revision replaces the open line");
+    const words = open.toLowerCase().split(/\s+/);
+    const repeated = words.filter((word, index) => word.length > 3 && words.indexOf(word) !== index);
+    assertEq(repeated.length, 0, "no repeated content word in the open line");
+  }
 }
 
 function testTapeChromeSegmentRestart() {
@@ -535,6 +576,46 @@ async function testLiveEngineMultiLangPivot() {
   mock.restore();
 }
 
+async function testPreviousLinesFollowLanguage() {
+  console.log("\n[LiveEngine] switching language retranslates earlier lines and the open line");
+  process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
+  const mock = installFetchMock();
+  clearLiveEngine("E2E-SWITCH");
+  clearSourceTape("E2E-SWITCH");
+
+  const earlier: Caption = {
+    id: "c-old",
+    original: "Deus ama o mundo.",
+    translated: "EN:Deus ama o mundo.",
+    translations: { pt: "Deus ama o mundo.", en: "EN:Deus ama o mundo." },
+    isFinal: true,
+    at: 1,
+  };
+  const filled = await fillMissingLanguages([earlier], "pt", ["es"]);
+  assertEq(filled.length, 1, "earlier line is sent again in the new language");
+  assert(earlier.translations.es?.includes("ES:"), "earlier line is translated into Spanish");
+
+  let targets: LanguageCode[] = ["en"];
+  const lives: Caption[] = [];
+  const engine = ensureLiveEngine("E2E-SWITCH", {
+    getSourceLang: () => "pt",
+    getTargets: () => targets,
+    onLive: (c) => lives.push({ ...c, translations: { ...c.translations } }),
+    onUpdate: () => undefined,
+    onFinal: () => undefined,
+  });
+  engine.push("A graça de Deus é suficiente", false);
+  await sleep(700);
+  assert(lives.some((c) => c.translations.en), "open line started in English");
+  targets = ["es"];
+  engine.retarget();
+  await sleep(900);
+  assert(lives.some((c) => c.translations.es), "open line follows the new language");
+
+  engine.clear();
+  mock.restore();
+}
+
 // —— Socket.IO E2E (minimal server wiring like production) ——
 
 async function testSocketCaptionFlow() {
@@ -639,6 +720,7 @@ async function main() {
   testTapeContinuedUtteranceAfterFreeze();
   testTapeFirstWordCorrection();
   testTapeRevisionDoesNotDuplicate();
+  testTapeLoggedRevisionsDoNotDuplicate();
   testTapeChromeSegmentRestart();
   testTapeFlushAll();
 
@@ -652,6 +734,7 @@ async function main() {
   await testLiveEngineContextSwitch();
   await testLiveEngineCancelsStaleFlight();
   await testLiveEngineMultiLangPivot();
+  await testPreviousLinesFollowLanguage();
   await testSocketCaptionFlow();
 
   console.log("\n═══ Results ═══");

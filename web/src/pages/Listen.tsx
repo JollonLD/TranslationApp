@@ -1,11 +1,11 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Flame } from "../components/Flame";
 import { TranscriptFeed } from "../components/TranscriptFeed";
-import { appendCaption, mergeSpaceCaptions, updateCaption } from "../lib/captions";
+import { appendCaption, mergePartial, mergeSpaceCaptions, updateCaption } from "../lib/captions";
+import { LISTEN_COPY } from "../lib/listenCopy";
 import { getSocket } from "../socket";
 import {
-  LANGUAGE_LABELS,
   LANGUAGES,
   RTL_LANGUAGES,
   captionText,
@@ -76,6 +76,11 @@ export function Listen() {
   const [summary, setSummary] = useState("");
   const [notesError, setNotesError] = useState<string | null>(null);
   const [copied, setCopied] = useState<"full" | "summary" | null>(null);
+  const notesGen = useRef(0);
+  const notesOpenRef = useRef(false);
+  const readLangRef = useRef(readLang);
+  readLangRef.current = readLang;
+  notesOpenRef.current = notesOpen;
   const translateHealth = space?.translateHealth ?? "ok";
   const showHealthBanner = Boolean(space && !ended && translateHealth === "down");
 
@@ -102,7 +107,7 @@ export function Listen() {
     const applyState = (next: SpaceState) => {
       setSpace(next);
       setCaptions((current) => mergeSpaceCaptions(current, next.captions));
-      setPartial(next.lastPartial);
+      setPartial((current) => mergePartial(current, next.lastPartial));
     };
 
     const join = () => {
@@ -111,7 +116,7 @@ export function Listen() {
         { code, role: "listener", targetLang: readLang },
         (result: { ok: boolean; space?: SpaceState; error?: string }) => {
           if (!result.ok || !result.space) {
-            setError(result.error ?? "Could not join this space.");
+            setError(result.error ?? LISTEN_COPY[readLangRef.current].couldNotJoin);
             setSpace(null);
             return;
           }
@@ -132,7 +137,7 @@ export function Listen() {
       setCaptions((current) => appendCaption(current, caption));
     });
     socket.on("caption:live", (caption: Caption) => {
-      setPartial(caption);
+      setPartial((current) => mergePartial(current, caption));
     });
     socket.on("caption:update", (caption: Caption) => {
       setCaptions((current) => updateCaption(current, caption));
@@ -168,6 +173,7 @@ export function Listen() {
         if (result?.space) {
           setSpace(result.space);
           setCaptions((current) => mergeSpaceCaptions(current, result.space!.captions));
+          setPartial((current) => mergePartial(current, result.space!.lastPartial));
         }
       },
     );
@@ -179,17 +185,20 @@ export function Listen() {
     if (clean) navigate(`/ouvir/${clean}`);
   }
 
-  function requestNotes(summarize: boolean) {
+  function loadNotes(lang: LanguageCode, summarize: boolean) {
     if (!code || !connected) return;
+    const gen = ++notesGen.current;
+    const copy = LISTEN_COPY[lang];
     setNotesBusy(true);
     setNotesError(null);
     getSocket().emit(
       "space:notes",
-      { code, lang: readLang, summarize },
+      { code, lang, summarize },
       (result?: NotesPayload) => {
+        if (gen !== notesGen.current) return;
         setNotesBusy(false);
         if (!result?.ok) {
-          setNotesError(result?.error ?? "Não foi possível carregar o texto.");
+          setNotesError(result?.error ?? copy.couldNotLoad);
           return;
         }
         setFullText(result.fullText ?? "");
@@ -199,6 +208,17 @@ export function Listen() {
     );
   }
 
+  useEffect(() => {
+    setSummary("");
+    setFullText("");
+    setCopied(null);
+    setNotesError(null);
+    if (!notesOpenRef.current || !code || !connected || ended) return;
+    loadNotes(readLang, false);
+    // Reload the open sheet in the newly selected language.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readLang]);
+
   function captionsToText(list: Caption[]) {
     return list
       .filter((item) => item.isFinal)
@@ -207,13 +227,17 @@ export function Listen() {
       .join("\n\n");
   }
 
-  function translationDocument(text: string) {
-    return `Chiesa Il Faro\n${LANGUAGE_LABELS[readLang]}\n${code}\n\n${text.trim()}\n`;
+  function translationDocument(text: string, kind: "translation" | "summary") {
+    const copy = LISTEN_COPY[readLang];
+    const label = kind === "summary" ? copy.docSummary : copy.docTranslation;
+    return `Chiesa Il Faro\n${label}\n${copy.langName}\n${code}\n\n${text.trim()}\n`;
   }
 
-  function translationFileName(kind: "traducao" | "resumo") {
+  function translationFileName(kind: "translation" | "summary") {
+    const copy = LISTEN_COPY[readLang];
+    const slug = kind === "summary" ? copy.fileSummary : copy.fileTranslation;
     const day = new Date().toISOString().slice(0, 10);
-    return `chiesa-il-faro-${code || "culto"}-${readLang}-${kind}-${day}.txt`;
+    return `chiesa-il-faro-${code || "culto"}-${readLang}-${slug}-${day}.txt`;
   }
 
   function saveTextFile(filename: string, text: string) {
@@ -229,32 +253,36 @@ export function Listen() {
   }
 
   function downloadTranslation() {
+    const lang = readLang;
+    const copy = LISTEN_COPY[lang];
     const local = captionsToText(captions);
     if (!code || !connected || ended || !space) {
       if (!local.trim()) {
-        setNotesError("Ainda não há tradução para baixar.");
+        setNotesError(copy.noDownload);
         setNotesOpen(true);
         return;
       }
-      saveTextFile(translationFileName("traducao"), translationDocument(local));
+      saveTextFile(translationFileName("translation"), translationDocument(local, "translation"));
       return;
     }
 
+    const gen = ++notesGen.current;
     setNotesBusy(true);
     setNotesError(null);
     getSocket().emit(
       "space:notes",
-      { code, lang: readLang, summarize: false },
+      { code, lang, summarize: false },
       (result?: NotesPayload) => {
+        if (gen !== notesGen.current) return;
         setNotesBusy(false);
         const text = result?.fullText?.trim() || local;
         if (!text) {
-          setNotesError(result?.error ?? "Ainda não há tradução para baixar.");
+          setNotesError(result?.error ?? copy.noDownload);
           setNotesOpen(true);
           return;
         }
         setFullText(text);
-        saveTextFile(translationFileName("traducao"), translationDocument(text));
+        saveTextFile(translationFileName("translation"), translationDocument(text, "translation"));
       },
     );
   }
@@ -266,10 +294,11 @@ export function Listen() {
       setCopied(kind);
       window.setTimeout(() => setCopied(null), 1600);
     } catch {
-      setNotesError("Não foi possível copiar.");
+      setNotesError(LISTEN_COPY[readLang].couldNotCopy);
     }
   }
 
+  const t = LISTEN_COPY[readLang];
   const rtl = RTL_LANGUAGES.has(readLang);
   const canOpenNotes = Boolean(code && connected && space && !ended);
   const canDownload = Boolean(captions.some((item) => item.isFinal) || canOpenNotes);
@@ -283,7 +312,7 @@ export function Listen() {
             Chiesa Il Faro
           </span>
           <label className="listen-lang-wrap">
-            <span className="sr-only">Language</span>
+            <span className="sr-only">{t.readIn}</span>
             <select
               className="select listen-lang"
               value={readLang}
@@ -291,11 +320,11 @@ export function Listen() {
                 const next = event.target.value;
                 if (isLanguage(next)) setReadLang(next);
               }}
-              aria-label="Read in"
+              aria-label={t.readIn}
             >
               {LANGUAGES.map((lang) => (
                 <option key={lang} value={lang}>
-                  {LANGUAGE_LABELS[lang]}
+                  {LISTEN_COPY[lang].langName}
                 </option>
               ))}
             </select>
@@ -303,23 +332,23 @@ export function Listen() {
           <div className="status">
             <span className={`dot ${connected && space && !ended ? "live" : ""}`} />
             {ended
-              ? "Space ended"
+              ? t.spaceEnded
               : !code
-                ? "Enter the code"
+                ? t.enterCode
                 : !connected
-                  ? "No connection"
+                  ? t.noConnection
                   : space
-                    ? `Live · ${LANGUAGE_LABELS[readLang]}`
-                    : "Looking…"}
+                    ? `${t.live} · ${t.langName}`
+                    : t.looking}
           </div>
           <div className="listen-actions">
             <button
               type="button"
               className="notes-open"
               disabled={!canOpenNotes || notesBusy}
-              onClick={() => requestNotes(false)}
+              onClick={() => loadNotes(readLang, false)}
             >
-              {notesBusy ? "…" : "Texto"}
+              {notesBusy ? "…" : t.text}
             </button>
             <button
               type="button"
@@ -327,9 +356,9 @@ export function Listen() {
               disabled={!canDownload || notesBusy}
               onClick={downloadTranslation}
             >
-              Baixar
+              {t.download}
             </button>
-            <div className="sizes" aria-label="Text size">
+            <div className="sizes" aria-label={t.textSize}>
               <button type="button" onClick={() => setSize((value) => Math.max(0, value - 1))}>
                 A-
               </button>
@@ -343,15 +372,13 @@ export function Listen() {
         <main className="listen-body">
           {showHealthBanner ? (
             <p className="health-banner" role="status">
-              Translation paused — still listening
+              {t.translationPaused}
             </p>
           ) : null}
           {error || ended || !code ? (
             <div>
               <p className={`waiting ${error || ended ? "error" : ""}`}>
-                {ended
-                  ? "This space has ended."
-                  : error || "Scan the booth QR or enter the code."}
+                {ended ? t.spaceEndedLong : error || t.scanQr}
               </p>
               <form className="field" style={{ marginTop: 24 }} onSubmit={goToCode}>
                 <input
@@ -361,11 +388,11 @@ export function Listen() {
                   autoCapitalize="characters"
                 />
                 <button className="btn" type="submit">
-                  Join
+                  {t.join}
                 </button>
               </form>
               <p style={{ marginTop: 18 }}>
-                <Link to="/">Back</Link>
+                <Link to="/">{t.back}</Link>
               </p>
             </div>
           ) : (
@@ -374,19 +401,19 @@ export function Listen() {
               partial={partial}
               language={readLang}
               showPartial
-              emptyText="Waiting for the word…"
+              emptyText={t.waiting}
             />
           )}
         </main>
       </div>
 
       {notesOpen ? (
-        <div className="notes-sheet" role="dialog" aria-modal="true" aria-label="Texto da ministração">
+        <div className="notes-sheet" role="dialog" aria-modal="true" aria-label={t.sheet}>
           <div className="notes-backdrop" onClick={() => setNotesOpen(false)} />
           <div className={`notes-panel${rtl ? " rtl" : ""}`}>
             <header className="notes-head">
-              <h2>Ministração</h2>
-              <button type="button" className="notes-close" onClick={() => setNotesOpen(false)} aria-label="Fechar">
+              <h2>{t.ministry}</h2>
+              <button type="button" className="notes-close" onClick={() => setNotesOpen(false)} aria-label={t.close}>
                 ×
               </button>
             </header>
@@ -395,15 +422,15 @@ export function Listen() {
 
             <section className="notes-section">
               <div className="notes-section-head">
-                <h3>Resumo</h3>
+                <h3>{t.summary}</h3>
                 <div className="notes-tools">
                   <button
                     type="button"
                     className="btn btn-ghost"
                     disabled={notesBusy}
-                    onClick={() => requestNotes(true)}
+                    onClick={() => loadNotes(readLang, true)}
                   >
-                    {notesBusy ? "Gerando…" : summary ? "Atualizar resumo" : "Gerar resumo"}
+                    {notesBusy ? t.generating : summary ? t.refreshSummary : t.generateSummary}
                   </button>
                   <button
                     type="button"
@@ -411,36 +438,34 @@ export function Listen() {
                     disabled={!summary.trim()}
                     onClick={() => void copyText("summary", summary)}
                   >
-                    {copied === "summary" ? "Copiado" : "Copiar"}
+                    {copied === "summary" ? t.copied : t.copy}
                   </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
                     disabled={!summary.trim()}
-                    onClick={() => saveTextFile(translationFileName("resumo"), translationDocument(summary))}
+                    onClick={() => saveTextFile(translationFileName("summary"), translationDocument(summary, "summary"))}
                   >
-                    Baixar
+                    {t.download}
                   </button>
                 </div>
               </div>
               <div className="notes-body">
-                {summary.trim()
-                  ? summary
-                  : "Toque em “Gerar resumo” para o modelo resumir a ministração no idioma escolhido."}
+                {summary.trim() ? summary : t.summaryHint}
               </div>
             </section>
 
             <section className="notes-section">
               <div className="notes-section-head">
-                <h3>Texto completo</h3>
+                <h3>{t.full}</h3>
                 <div className="notes-tools">
                   <button
                     type="button"
                     className="btn btn-ghost"
                     disabled={notesBusy}
-                    onClick={() => requestNotes(false)}
+                    onClick={() => loadNotes(readLang, false)}
                   >
-                    Atualizar
+                    {t.refresh}
                   </button>
                   <button
                     type="button"
@@ -448,7 +473,7 @@ export function Listen() {
                     disabled={!fullText.trim()}
                     onClick={() => void copyText("full", fullText)}
                   >
-                    {copied === "full" ? "Copiado" : "Copiar"}
+                    {copied === "full" ? t.copied : t.copy}
                   </button>
                   <button
                     type="button"
@@ -457,15 +482,15 @@ export function Listen() {
                     onClick={() => {
                       const text = fullText.trim() || captionsToText(captions);
                       if (!text) return;
-                      saveTextFile(translationFileName("traducao"), translationDocument(text));
+                      saveTextFile(translationFileName("translation"), translationDocument(text, "translation"));
                     }}
                   >
-                    Baixar
+                    {t.download}
                   </button>
                 </div>
               </div>
               <div className="notes-body notes-full">
-                {fullText.trim() || "Ainda não há legendas finais para montar o texto."}
+                {fullText.trim() || t.noCaptions}
               </div>
             </section>
           </div>

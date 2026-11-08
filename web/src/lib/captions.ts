@@ -39,6 +39,19 @@ export function updateCaption(list: Caption[], caption: Caption): Caption[] {
   return next;
 }
 
+export function mergePartial(current: Caption | null, incoming: Caption | null): Caption | null {
+  if (!incoming) return null;
+  if (!current || current.id !== incoming.id) return incoming;
+  return {
+    ...current,
+    ...incoming,
+    translations: { ...current.translations, ...incoming.translations },
+    translated: incoming.translated || current.translated,
+    original: incoming.original || current.original,
+    bibleRef: incoming.bibleRef || current.bibleRef,
+  };
+}
+
 export function mergeSpaceCaptions(current: Caption[], incoming: Caption[]): Caption[] {
   const currentById = new Map(current.map((item) => [item.id, item]));
   const mergedIncoming = incoming.map((item) => {

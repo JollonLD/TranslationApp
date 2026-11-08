@@ -18,6 +18,7 @@ type Pending = {
 
 let child: ChildProcessWithoutNullStreams | null = null;
 let ready = false;
+let reportedDown = false;
 let seq = 0;
 const pending = new Map<string, Pending>();
 
@@ -56,6 +57,7 @@ export function startNllbWorker() {
     child = spawn(python, [script], {
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
+      windowsHide: true,
     });
   } catch (error) {
     writeLog(`[nllb] could not start (${error instanceof Error ? error.message : error})`);
@@ -71,7 +73,7 @@ export function startNllbWorker() {
   });
   child.on("exit", (code) => {
     ready = false;
-    writeLog(`[nllb] exited (${code ?? "signal"})`);
+    if (!reportedDown) writeLog(`[nllb] exited (${code ?? "signal"})`);
     for (const id of [...pending.keys()]) settle(id, null);
     child = null;
   });
@@ -90,7 +92,18 @@ export function startNllbWorker() {
     }
     if (typeof payload.ready === "boolean" && payload.id == null) {
       ready = payload.ready;
-      writeLog(payload.ready ? "[nllb] ready" : `[nllb] unavailable (${payload.error ?? "unknown"})`);
+      if (payload.ready) {
+        writeLog("[nllb] ready");
+      } else {
+        reportedDown = true;
+        const reason = payload.error ?? "unknown";
+        const missingPackage = /no module named ['"]transformers['"]/i.test(reason);
+        writeLog(
+          missingPackage
+            ? "[nllb] pacote transformers ausente — persa e urdu usam o tradutor online"
+            : `[nllb] modelo local indisponível (${reason}) — persa e urdu usam o tradutor online`,
+        );
+      }
       return;
     }
     if (payload.id == null) return;

@@ -55392,10 +55392,12 @@ function openAppWindow(url) {
 // server/src/firewall.ts
 var import_node_child_process2 = require("node:child_process");
 function firewallHint() {
+  if (process.platform !== "linux") return null;
   try {
     const status = (0, import_node_child_process2.execSync)("systemctl is-active ufw", {
       encoding: "utf8",
-      timeout: 1500
+      timeout: 1500,
+      stdio: ["ignore", "pipe", "ignore"]
     }).trim();
     if (status === "active") {
       return "sudo ufw allow 3000/tcp";
@@ -56389,6 +56391,7 @@ var import_node_path3 = __toESM(require("node:path"), 1);
 var import_node_readline = require("node:readline");
 var child = null;
 var ready = false;
+var reportedDown = false;
 var seq = 0;
 var pending = /* @__PURE__ */ new Map();
 function nllbRequested() {
@@ -56418,7 +56421,8 @@ function startNllbWorker() {
   try {
     child = (0, import_node_child_process3.spawn)(python, [script], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env: process.env,
+      windowsHide: true
     });
   } catch (error) {
     writeLog(`[nllb] could not start (${error instanceof Error ? error.message : error})`);
@@ -56433,7 +56437,7 @@ function startNllbWorker() {
   });
   child.on("exit", (code) => {
     ready = false;
-    writeLog(`[nllb] exited (${code ?? "signal"})`);
+    if (!reportedDown) writeLog(`[nllb] exited (${code ?? "signal"})`);
     for (const id of [...pending.keys()]) settle(id, null);
     child = null;
   });
@@ -56451,7 +56455,16 @@ function startNllbWorker() {
     }
     if (typeof payload.ready === "boolean" && payload.id == null) {
       ready = payload.ready;
-      writeLog(payload.ready ? "[nllb] ready" : `[nllb] unavailable (${payload.error ?? "unknown"})`);
+      if (payload.ready) {
+        writeLog("[nllb] ready");
+      } else {
+        reportedDown = true;
+        const reason = payload.error ?? "unknown";
+        const missingPackage = /no module named ['"]transformers['"]/i.test(reason);
+        writeLog(
+          missingPackage ? "[nllb] pacote transformers ausente \u2014 persa e urdu usam o tradutor online" : `[nllb] modelo local indispon\xEDvel (${reason}) \u2014 persa e urdu usam o tradutor online`
+        );
+      }
       return;
     }
     if (payload.id == null) return;
@@ -57569,6 +57582,17 @@ async function localOrGoogle(text, source, target) {
   if (local) return local;
   return translateGoogleDraft(text, source, target);
 }
+async function translateHistorical(text, source, target) {
+  let out = null;
+  if (rivaCanPivot(source, target)) out = await translateRiva(text, source, target);
+  if (!out) {
+    const many = await translateMany(text, source, [target]);
+    out = many[target] ?? null;
+  }
+  const trimmed = out?.trim() ?? "";
+  if (!trimmed || trimmed === text.trim()) return null;
+  return trimmed;
+}
 var LiveEngine = class {
   code;
   hooks;
@@ -57608,6 +57632,13 @@ var LiveEngine = class {
     const snap = tape.flushAll();
     this.handleSnapshot(snap);
     this.clearSilence();
+  }
+  /** Listener switched language: translate the line that is still open. */
+  retarget() {
+    if (this.closed) return;
+    const open = (this.liveOriginal || getSourceTape(this.code).getOpenText()).trim();
+    if (!open) return;
+    this.scheduleTranslate(open, false);
   }
   clear() {
     this.closed = true;
@@ -57833,6 +57864,15 @@ var LiveEngine = class {
     for (const [lang, text] of settled) {
       translations[lang] = text;
     }
+    const late = this.hooks.getTargets().filter((lang) => lang !== source && !translations[lang]);
+    if (late.length) {
+      const extra = await Promise.all(
+        late.map(async (lang) => [lang, await translateHistorical(original, source, lang)])
+      );
+      for (const [lang, text] of extra) {
+        if (text) translations[lang] = polishChurchTerms(text, lang);
+      }
+    }
     const hits = detectBibleRefs(original);
     let bibleRef;
     if (hits[0]) {
@@ -57908,38 +57948,26 @@ function clearLiveEngine(code) {
 }
 async function fillMissingLanguages(captions, source, langs, limit = 80) {
   const targets = langs.filter((l) => l !== source);
-  if (!targets.length) return false;
-  let changed = false;
+  if (!targets.length) return [];
+  const updated = [];
   const recent = captions.filter((c) => c.isFinal).slice(-limit);
   await Promise.all(
     recent.map(async (caption) => {
-      const missing = targets.filter((lang) => !caption.translations[lang]);
+      const missing = targets.filter((lang) => !caption.translations[lang]?.trim());
       if (!missing.length) return;
-      const viaRiva = [];
-      const viaGoogle = [];
-      for (const lang of missing) {
-        if (rivaCanPivot(source, lang)) viaRiva.push(lang);
-        else viaGoogle.push(lang);
-      }
+      let touched = false;
       await Promise.all(
-        viaRiva.map(async (lang) => {
-          const out = await translateRiva(caption.original, source, lang);
-          if (out) {
-            caption.translations[lang] = out;
-            changed = true;
-          }
+        missing.map(async (lang) => {
+          const out = await translateHistorical(caption.original, source, lang);
+          if (!out) return;
+          caption.translations[lang] = out;
+          touched = true;
         })
       );
-      if (viaGoogle.length) {
-        Object.assign(
-          caption.translations,
-          await translateMany(caption.original, source, viaGoogle)
-        );
-        changed = true;
-      }
+      if (touched) updated.push(caption);
     })
   );
-  return changed;
+  return updated;
 }
 
 // server/src/spaces.ts
@@ -58312,6 +58340,47 @@ function captionText(caption, lang) {
 }
 
 // server/src/sermonNotes.ts
+var NOTES_MESSAGE = {
+  pt: {
+    notEnough: "Ainda n\xE3o h\xE1 texto suficiente para o resumo.",
+    summaryFailed: "N\xE3o foi poss\xEDvel gerar o resumo agora. Voc\xEA ainda pode copiar o texto completo abaixo.",
+    missingSpace: "Este culto n\xE3o existe ou j\xE1 terminou.",
+    failed: "N\xE3o foi poss\xEDvel montar o texto."
+  },
+  en: {
+    notEnough: "There is not enough text for a summary yet.",
+    summaryFailed: "The summary could not be generated right now. You can still copy the full text below.",
+    missingSpace: "This space does not exist or has already ended.",
+    failed: "Could not build the text."
+  },
+  es: {
+    notEnough: "Todav\xEDa no hay texto suficiente para el resumen.",
+    summaryFailed: "No se pudo generar el resumen ahora. A\xFAn puedes copiar el texto completo de abajo.",
+    missingSpace: "Este culto no existe o ya termin\xF3.",
+    failed: "No se pudo armar el texto."
+  },
+  it: {
+    notEnough: "Non c\u2019\xE8 ancora abbastanza testo per il riassunto.",
+    summaryFailed: "Non \xE8 stato possibile generare il riassunto adesso. Puoi comunque copiare il testo completo qui sotto.",
+    missingSpace: "Questo culto non esiste o \xE8 gi\xE0 terminato.",
+    failed: "Impossibile comporre il testo."
+  },
+  fa: {
+    notEnough: "\u0647\u0646\u0648\u0632 \u0645\u062A\u0646 \u06A9\u0627\u0641\u06CC \u0628\u0631\u0627\u06CC \u062E\u0644\u0627\u0635\u0647 \u0646\u06CC\u0633\u062A.",
+    summaryFailed: "\u0627\u0644\u0627\u0646 \u0633\u0627\u062E\u062A \u062E\u0644\u0627\u0635\u0647 \u0645\u0645\u06A9\u0646 \u0646\u0634\u062F. \u0647\u0646\u0648\u0632 \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0645\u062A\u0646 \u06A9\u0627\u0645\u0644 \u067E\u0627\u06CC\u06CC\u0646 \u0631\u0627 \u06A9\u067E\u06CC \u06A9\u0646\u06CC\u062F.",
+    missingSpace: "\u0627\u06CC\u0646 \u062C\u0644\u0633\u0647 \u0648\u062C\u0648\u062F \u0646\u062F\u0627\u0631\u062F \u06CC\u0627 \u0628\u0647 \u067E\u0627\u06CC\u0627\u0646 \u0631\u0633\u06CC\u062F\u0647 \u0627\u0633\u062A.",
+    failed: "\u0633\u0627\u062E\u062A \u0645\u062A\u0646 \u0645\u0645\u06A9\u0646 \u0646\u0634\u062F."
+  },
+  ur: {
+    notEnough: "\u062E\u0644\u0627\u0635\u06D2 \u06A9\u06D2 \u0644\u06CC\u06D2 \u0627\u0628\u06BE\u06CC \u06A9\u0627\u0641\u06CC \u0645\u062A\u0646 \u0646\u06C1\u06CC\u06BA\u06D4",
+    summaryFailed: "\u062E\u0644\u0627\u0635\u06C1 \u0627\u0628\u06BE\u06CC \u0646\u06C1\u06CC\u06BA \u0628\u0646 \u0633\u06A9\u0627\u06D4 \u0622\u067E \u0646\u06CC\u0686\u06D2 \u0645\u06A9\u0645\u0644 \u0645\u062A\u0646 \u06A9\u0627\u067E\u06CC \u06A9\u0631 \u0633\u06A9\u062A\u06D2 \u06C1\u06CC\u06BA\u06D4",
+    missingSpace: "\u06CC\u06C1 \u062E\u062F\u0645\u062A \u0645\u0648\u062C\u0648\u062F \u0646\u06C1\u06CC\u06BA \u06CC\u0627 \u062E\u062A\u0645 \u06C1\u0648 \u0686\u06A9\u06CC \u06C1\u06D2\u06D4",
+    failed: "\u0645\u062A\u0646 \u0646\u06C1\u06CC\u06BA \u0628\u0646 \u0633\u06A9\u0627\u06D4"
+  }
+};
+function notesMessage(lang, key) {
+  return NOTES_MESSAGE[lang][key];
+}
 function buildFullTranscript(space, lang) {
   const lines = space.captions.filter((caption) => caption.isFinal).map((caption) => captionText(caption, lang).trim()).filter(Boolean);
   return {
@@ -58325,7 +58394,7 @@ async function buildSermonNotes(space, lang) {
   if (!transcript.fullText.trim()) {
     return {
       ok: false,
-      error: "Ainda n\xE3o h\xE1 texto suficiente para o resumo.",
+      error: notesMessage(lang, "notEnough"),
       ...transcript,
       summary: ""
     };
@@ -58338,7 +58407,7 @@ async function buildSermonNotes(space, lang) {
   return {
     ok: true,
     ...transcript,
-    summary: summary || "N\xE3o foi poss\xEDvel gerar o resumo agora. Voc\xEA ainda pode copiar o texto completo abaixo."
+    summary: summary || notesMessage(lang, "summaryFailed")
   };
 }
 
@@ -58502,9 +58571,12 @@ function listenerTargets(code) {
   return [...langs];
 }
 async function fillTranslations(space, langs, limit = 80) {
-  const changed = await fillMissingLanguages(space.captions, space.sourceLang, langs, limit);
+  const updated = await fillMissingLanguages(space.captions, space.sourceLang, langs, limit);
   syncTranslateHealth(space);
-  return changed;
+  for (const caption of updated) {
+    io2.to(roomName(space.code)).emit("caption:update", caption);
+  }
+  return updated;
 }
 function syncTranslateHealth(space) {
   const fallback = getTranslateHealth();
@@ -58605,7 +58677,11 @@ io2.on("connection", (socket) => {
     (payload, ack) => {
       const space = getSpace(payload?.code ?? "");
       if (!space) {
-        ack?.({ ok: false, error: "This space does not exist or has already ended." });
+        const lang = isLanguage(payload?.targetLang) ? payload.targetLang : "en";
+        ack?.({
+          ok: false,
+          error: payload?.role === "host" ? "This space does not exist or has already ended." : notesMessage(lang, "missingSpace")
+        });
         return;
       }
       if (payload.role === "host" && !claimHost(space, socket.id)) {
@@ -58624,8 +58700,8 @@ io2.on("connection", (socket) => {
         publicBaseUrl: publicBaseUrl || null
       });
       if (socket.data.role === "listener") {
-        void fillTranslations(space, [socket.data.targetLang]).then((changed) => {
-          if (changed) emitSpace(space.code);
+        void fillTranslations(space, [socket.data.targetLang]).then((updated) => {
+          if (updated.length) emitSpace(space.code);
         });
       }
     }
@@ -58642,6 +58718,7 @@ io2.on("connection", (socket) => {
       socket.data.role = socket.data.role ?? "listener";
       socket.data.targetLang = payload.lang;
       void fillTranslations(space, [payload.lang]).then(() => {
+        engineFor(space.code).retarget();
         emitSpace(space.code);
         ack?.({
           ok: true,
@@ -58656,7 +58733,7 @@ io2.on("connection", (socket) => {
       const space = getSpace(payload?.code ?? "");
       const lang = isLanguage(payload?.lang) ? payload.lang : isLanguage(socket.data.targetLang) ? socket.data.targetLang : "en";
       if (!space) {
-        ack?.({ ok: false, error: "This space does not exist or has already ended." });
+        ack?.({ ok: false, error: notesMessage(lang, "missingSpace") });
         return;
       }
       void (async () => {
@@ -58670,7 +58747,7 @@ io2.on("connection", (socket) => {
           const transcript = buildFullTranscript(space, lang);
           ack?.({ ok: true, ...transcript, summary: "" });
         } catch (error) {
-          const msg = error instanceof Error ? error.message : "Could not build notes.";
+          const msg = error instanceof Error ? error.message : notesMessage(lang, "failed");
           ack?.({ ok: false, error: msg });
         }
       })();

@@ -452,6 +452,15 @@ h2,
   box-shadow: 0 0 0 4px rgba(224, 122, 106, 0.18);
 }
 
+.listen-page.rtl {
+  direction: rtl;
+}
+
+.listen-page.rtl[data-lang="fa"],
+.listen-page.rtl[data-lang="ur"] {
+  font-family: "Noto Naskh Arabic", "Figtree", sans-serif;
+}
+
 .rtl .transcript,
 .rtl .waiting {
   direction: rtl;
