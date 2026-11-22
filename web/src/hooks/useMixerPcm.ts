@@ -84,7 +84,14 @@ export function useMixerPcm(handlers: PcmHandlers) {
         if (now - lastEmit >= LEVEL_INTERVAL_MS) {
           const peakDb = dbfs(accPeak);
           const rmsDb = dbfs(accRms);
-          setLevel({ peakDb, rmsDb, status: classifier.push(peakDb, rmsDb, now) });
+          const status = classifier.push(peakDb, rmsDb, now);
+          // 2 dB steps: the meter still moves, the booth page re-renders only on real change.
+          const q = (db: number) => (Number.isFinite(db) ? Math.round(db / 2) * 2 : db);
+          setLevel((prev) =>
+            prev.status === status && q(prev.peakDb) === q(peakDb) && q(prev.rmsDb) === q(rmsDb)
+              ? prev
+              : { peakDb, rmsDb, status },
+          );
           accPeak = 0;
           accRms = 0;
           lastEmit = now;
