@@ -84,10 +84,15 @@ function prepareSource(text: string, source: LanguageCode) {
 }
 
 /** Capitalize and close a committed caption so it reads as a sentence before the model edits it. */
-export function finishSentence(text: string) {
+/**
+ * Close a caption line. A block cut at a clause break ends with "…" and the
+ * next block, which continues that sentence, keeps its lowercase start.
+ */
+export function finishSentence(text: string, continuesPrevious = false) {
   let out = text.trim().replace(/\s+/g, " ");
   if (!out) return out;
-  out = out.charAt(0).toLocaleUpperCase() + out.slice(1);
+  if (!continuesPrevious) out = out.charAt(0).toLocaleUpperCase() + out.slice(1);
+  if (/[,;:]$/.test(out)) return `${out.slice(0, -1)}…`;
   if (!/[.?!…]["'»”)]*$/.test(out)) out = `${out}.`;
   return out;
 }
