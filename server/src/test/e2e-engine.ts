@@ -26,6 +26,7 @@ import {
 import {
   FREEZE_SILENCE_MS,
   SourceTape,
+  cleanWebSpeech,
   clearSourceTape,
 } from "../sourceTape.js";
 import { finishSentence } from "../translate.js";
@@ -1038,6 +1039,110 @@ async function testLiveEngineNoisyMtStaysReadable() {
   mock.restore();
 }
 
+// —— Web Speech (Edge/Chrome): regressions from a real Italian service ——
+
+/** Feed hypotheses like the browser does; returns every frozen caption. */
+function runWebSpeech(steps: Array<{ text: string; final?: boolean; pauseMs?: number }>) {
+  const tape = new SourceTape();
+  const frozen: string[] = [];
+  let t = 1_000;
+  for (const step of steps) {
+    t += step.pauseMs ?? 300;
+    frozen.push(...tape.freezeSilence(t).frozen);
+    frozen.push(...tape.push(step.text, Boolean(step.final), t).frozen);
+  }
+  t += 3_000;
+  frozen.push(...tape.freezeSilence(t).frozen);
+  frozen.push(...tape.flushAll().frozen);
+  return { frozen, tape };
+}
+
+function testWebSpeechCutWordRestart() {
+  console.log("\n[Web Speech] cut-off last word: revision replaces, never appends");
+  const { tape } = (() => {
+    const t = new SourceTape();
+    let at = 1_000;
+    for (const h of [
+      "si tro",
+      "si trovava in carcere no pa",
+      "si trovava in carcere no paolo scrive ai filipp",
+      "si trovava in carcere no paolo scrive ai filippesi mentre è in prigione",
+    ]) t.push(h, false, (at += 300));
+    return { tape: t };
+  })();
+  assertEq(
+    tape.getOpenText(),
+    "si trovava in carcere no paolo scrive ai filippesi mentre è in prigione",
+    "real case: 'si tro si trovava in carcere no pa si trovava…' no longer happens",
+  );
+  const { frozen } = runWebSpeech([
+    { text: "di costruire le mura a intorno a gerusalemme è sceso in piazza ha letto anche qu" },
+    { text: "di costruire le mura a intorno a gerusalemme è sceso in piazza ha letto anche questo", final: true },
+  ]);
+  assertEq(plainWords(frozen.join(" ")).filter((w) => w === "costruire").length, 1, "real case: 'anche qu di costruire…' said once");
+}
+
+function testWebSpeechLongUtterancePauses() {
+  console.log("\n[Web Speech] long utterance across pauses + late finals: each word once");
+  const base = words(
+    "con il padre e cosa questo dio ha fatto per te allora dentro di te sarà una gioia diversa una gioia che non sparisce fra oggi e domani o fra un mese quando uscirà una macchina nuova o quello che sia ma questa gioia rimane questa gioia eterna no perché è una gioia che non proviene da noi è una gioia che proviene da dio e allora possiamo",
+  );
+  const steps: Array<{ text: string; final?: boolean; pauseMs?: number }> = [];
+  for (let n = 30; n < base.length; n += 4) steps.push({ text: base.slice(0, n).join(" "), pauseMs: n % 8 === 2 ? 2_600 : 400 });
+  // Edge then sends punctuated finals for parts it already showed, out of order.
+  steps.push(
+    { text: "No, perché è una gioia che non proviene da noi, è una gioia che proviene da Dio.", final: true },
+    { text: "E cosa questo Dio ha fatto per te, allora dentro di te sarà una gioia diversa, una gioia che non sparisce fra oggi e domani o fra un mese quando uscirà una macchina nuova o quello che sia.", final: true },
+    { text: "Ma questa gioia rimane, questa gioia eterna?", final: true },
+    { text: "E allora possiamo.", final: true },
+    { text: "Devi deve cantare il primo canto voi tutti abitanti della terra.", final: true, pauseMs: 3_000 },
+  );
+  const { frozen } = runWebSpeech(steps);
+  const expected = [...base, ...plainWords("Devi deve cantare il primo canto voi tutti abitanti della terra")];
+  const got = plainWords(frozen.join(" "));
+  assertEq(got.length, expected.length, `word count ${got.length} equals spoken ${expected.length} (main had ~7x)`);
+  assertEq(got.join(" "), expected.join(" "), "every word once, in order");
+}
+
+function testWebSpeechGluedCom() {
+  console.log("\n[Web Speech] Edge '…sappiamo.com' glitch does not leak or duplicate");
+  assertEq(cleanWebSpeech("E.com e come avevamo oggi"), "E e come avevamo oggi", "short glued token keeps its word");
+  assertEq(
+    cleanWebSpeech("ma una roccia su cuiaggrapparsiquandoleproprieforzevengonomenoperchenoisappiamo.com"),
+    "ma una roccia su",
+    "long glued token dropped",
+  );
+  const { frozen } = runWebSpeech([
+    { text: "ma una roccia su cui aggrapparsi quando le proprie forze vengono meno perché noi sappiamo" },
+    { text: "ma una roccia su cuiaggrapparsiquandoleproprieforzevengonomenoperchenoisappiamo.com" },
+    { text: "ma una roccia su cui aggrapparsi quando le proprie forze vengono meno perché noi sappiamo come è il popolo d'isra" },
+    { text: "ma una roccia su cui aggrapparsi quando le proprie forze vengono meno perché noi sappiamo come è il popolo d'israele", final: true },
+  ]);
+  assertEq(frozen.length, 1, "one caption");
+  assertEq(
+    plainWords(frozen[0]).join(" "),
+    plainWords("ma una roccia su cui aggrapparsi quando le proprie forze vengono meno perché noi sappiamo come è il popolo d'israele").join(" "),
+    "the sentence once, no '.com'",
+  );
+}
+
+function testWebSpeechKeepsRealRepetition() {
+  console.log("\n[Web Speech] real repetition by the speaker is kept");
+  const { frozen } = runWebSpeech([
+    { text: "grazie per quella croce", final: true },
+    { text: "grazie per quel sacrificio", final: true },
+    { text: "Tutto questo ti chiediamo nel nome di Gesù.", final: true, pauseMs: 2_500 },
+    { text: "Amen.", final: true, pauseMs: 2_500 },
+    { text: "Sì o no?", final: true, pauseMs: 2_500 },
+    { text: "Rallegratevi nel signore, sempre.", final: true, pauseMs: 2_500 },
+    { text: "Paolo dice rallegratevi nel signore sempre, ripeto, rallegratevi.", final: true, pauseMs: 2_500 },
+  ]);
+  const text = plainWords(frozen.join(" ")).join(" ");
+  assert(text.includes("grazie per quella croce grazie per quel sacrificio"), "'grazie per…' twice, as said");
+  assert(text.includes("amen"), "short 'Amen.' kept");
+  assertEq(text.split("rallegratevi").length - 1, 3, "'rallegratevi' three times, as said");
+}
+
 async function testSocketCaptionFlow() {
   console.log("\n[Socket E2E] host transcript → listener caption:live / caption");
   process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
@@ -1153,6 +1258,10 @@ async function main() {
   testWlkSilenceFrozeTipBeforeCommit();
   testWlkTipRevisionSettles();
   testWlkServerHistoryRestart();
+  testWebSpeechCutWordRestart();
+  testWebSpeechLongUtterancePauses();
+  testWebSpeechGluedCom();
+  testWebSpeechKeepsRealRepetition();
   testStableTextMonotonic();
   testStableTextHoldsOnDisagreement();
   testStableTextTailFix();
