@@ -12,6 +12,15 @@ import { resolveTool } from "./paths.js";
 export const DEFAULT_INIT_PROMPT =
   "Culto cristão. Jesus Cristo, Espírito Santo, Deus Pai, aleluia, amém, santificação, salvação, graça, Evangelho, Gênesis, Êxodo, Salmos, Provérbios, Isaías, Mateus, Marcos, Lucas, João, Atos, Romanos, Coríntios, Gálatas, Efésios, Apocalipse.";
 
+export const DEFAULT_INIT_PROMPT_IT =
+  "Culto cristiano. Gesù Cristo, Spirito Santo, Dio Padre, alleluia, amen, santificazione, salvezza, grazia, Vangelo, Genesi, Esodo, Salmi, Proverbi, Isaia, Neemia, Matteo, Marco, Luca, Giovanni, Atti, Romani, Corinzi, Galati, Efesini, Filippesi, Apocalisse.";
+
+/** Built-in vocabulary prompt for the recognition language (Portuguese when unknown). */
+export function defaultInitPrompt(language?: string) {
+  const lang = (language ?? process.env.WLK_LANGUAGE ?? "pt").trim().toLowerCase();
+  return lang === "it" ? DEFAULT_INIT_PROMPT_IT : DEFAULT_INIT_PROMPT;
+}
+
 export type AsrMode = "whisperlivekit" | "webspeech";
 
 type SidecarState = {
@@ -122,7 +131,7 @@ async function boot(): Promise<SidecarState> {
     process.env.WLK_PAUSE_SECONDS?.trim() || "1.2",
   ];
 
-  const initPrompt = process.env.WLK_INIT_PROMPT ?? DEFAULT_INIT_PROMPT;
+  const initPrompt = process.env.WLK_INIT_PROMPT ?? defaultInitPrompt(language);
   if (initPrompt.trim()) args.push("--static-init-prompt", initPrompt.trim());
 
   writeLog(`starting WhisperLiveKit: ${bin} ${[...launch, ...args].join(" ")}`);

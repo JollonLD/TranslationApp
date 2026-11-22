@@ -55,20 +55,7 @@ function joinWords(parts: string[]) {
   return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
 }
 
-/** Longest matching word prefix length (case-insensitive bare forms). */
-function sharedPrefixLen(a: string[], b: string[]) {
-  const n = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < n && bare(a[i]) === bare(b[i])) i += 1;
-  return i;
-}
 
-function sameStem(a: string, b: string) {
-  const x = bare(a);
-  const y = bare(b);
-  const n = Math.min(4, x.length, y.length);
-  return n >= 3 && x.slice(0, n) === y.slice(0, n);
-}
 
 function fold(word: string) {
   return bare(word).normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -83,21 +70,86 @@ function alike(a: string, b: string) {
   return n >= 3 && x.slice(0, n) === y.slice(0, n);
 }
 
-/** Longest suffix of `prev` that matches a prefix of `next`. */
-function overlapSuffixPrefix(prev: string[], next: string[]) {
-  const max = Math.min(prev.length, next.length, 40);
-  for (let k = max; k >= 1; k -= 1) {
-    let ok = true;
-    for (let i = 0; i < k; i += 1) {
-      if (bare(prev[prev.length - k + i]) !== bare(next[i])) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return k;
-  }
-  return 0;
+function wordMatch(a: string, b: string) {
+  return fold(a) === fold(b);
 }
+
+/** `cut` is the cut-off start of `full` ("tro" / "trovava", "filipp" / "filippesi"). */
+function cutOff(cut: string, full: string) {
+  const x = fold(cut);
+  const y = fold(full);
+  return x.length >= 2 && y.length > x.length && y.startsWith(x);
+}
+
+/**
+ * Words two hypotheses share from the start. Only the older one's LAST word may
+ * be cut off ("si tro" → "si trovava"), so "dio" never swallows "di".
+ */
+function fuzzyPrefix(older: string[], newer: string[]) {
+  const n = Math.min(older.length, newer.length);
+  let i = 0;
+  while (i < n) {
+    if (wordMatch(older[i], newer[i])) i += 1;
+    else if (i === older.length - 1 && cutOff(older[i], newer[i])) i += 1;
+    else break;
+  }
+  return i;
+}
+
+/**
+ * The recognizer added, dropped or swapped a word or two at the start
+ * ("sono andato" → "io sono andato", "il pane" → "al pane").
+ */
+function shiftedStart(older: string[], newer: string[]) {
+  for (let off = 1; off <= 2; off += 1) {
+    const need = (n: number) => Math.min(3, n);
+    if (older.length - off >= 2 && newer.length > off && fuzzyPrefix(older.slice(off), newer.slice(off)) >= need(older.length - off)) return true;
+    if (newer.length > off && fuzzyPrefix(older, newer.slice(off)) >= need(older.length) && older.length >= 2) return true;
+    if (older.length > off && fuzzyPrefix(older.slice(off), newer) >= need(older.length - off) && older.length - off >= 2) return true;
+  }
+  return false;
+}
+
+/** Longest prefix of `incoming` found as a contiguous run inside `known`. */
+function longestKnownPrefix(known: string[], incoming: string[]) {
+  let best = 0;
+  let bestAtEnd = false;
+  for (let s = 0; s < known.length; s += 1) {
+    if (!wordMatch(known[s], incoming[0] ?? "")) continue;
+    let k = 0;
+    while (s + k < known.length && k < incoming.length && wordMatch(known[s + k], incoming[k])) k += 1;
+    if (k > best || (k === best && s + k === known.length)) {
+      best = k;
+      bestAtEnd = s + k === known.length;
+    }
+  }
+  return { length: best, atEnd: bestAtEnd };
+}
+
+/**
+ * Edge dictation turns "… come"/"… com…" into a fake web address and glues the
+ * words before it ("nonso.com", "chiosservaisuoi.com"). The same words are
+ * always said again right after, so a long glued token is dropped and a short
+ * one keeps its word.
+ */
+export function cleanWebSpeech(text: string) {
+  return text
+    .split(/\s+/)
+    .map((token) => {
+      const m = token.match(/^(\S+?)\.(?:com|ca)([.,!?…]*)$/i);
+      if (!m) return token;
+      return m[1].length >= 14 ? "" : `${m[1]}${m[2]}`;
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** A pause longer than this ends a burst of re-segmenting finals. */
+const RESEGMENT_GAP_MS = 1_500;
+
+/** Recent words checked when a new utterance may only resend what was said. */
+const RESEND_WINDOW = 60;
+
 
 export class SourceTape {
   /** Permanently confirmed words (whole session, bounded). */
@@ -110,6 +162,27 @@ export class SourceTape {
   private lastOpenKey = "";
   /** Tip words a pause froze before the ASR committed them. */
   private frozenTip: string[] = [];
+  /*
+   * Web Speech (Chrome/Edge) sends the whole current utterance on every update.
+   * The tape tracks that utterance so a revision replaces it instead of being
+   * appended, and words already frozen are never pasted again.
+   */
+  /** Open words left over from earlier utterances. */
+  private carry: string[] = [];
+  /** Latest hypothesis of the current utterance. */
+  private utt: string[] = [];
+  /** How many words of `utt` were already frozen. */
+  private uttFrozen = 0;
+  /** A final closed the utterance: the next update starts a new one. */
+  private uttClosed = true;
+  /** Length of the last real utterance: late finals may resend any part of it. */
+  private prevUttLength = 0;
+  /**
+   * Finals arriving right after an open interim re-segment what was just shown
+   * (Edge sends punctuated sentences for it). Inside that burst even a one-word
+   * overlap with the end is a resend.
+   */
+  private resegmenting = false;
 
   reset() {
     this.confirmed = [];
@@ -118,6 +191,12 @@ export class SourceTape {
     this.lastInputAt = 0;
     this.lastOpenKey = "";
     this.frozenTip = [];
+    this.carry = [];
+    this.utt = [];
+    this.uttFrozen = 0;
+    this.uttClosed = true;
+    this.prevUttLength = 0;
+    this.resegmenting = false;
   }
 
   msSinceLastInput(now = Date.now()) {
@@ -147,28 +226,24 @@ export class SourceTape {
   }
 
   push(raw: string, isFinal: boolean, now = Date.now()): TapePushResult {
+    const gap = this.lastInputAt ? now - this.lastInputAt : Number.POSITIVE_INFINITY;
     this.lastInputAt = now;
-    const text = normalize(raw);
+    const text = normalize(cleanWebSpeech(raw));
     const frozen: string[] = [];
 
     if (!text) {
       return this.snapshot(frozen, false, false);
     }
 
-    const incoming = wordsOf(text);
-    this.absorb(incoming, isFinal);
+    this.absorbUtterance(wordsOf(text), isFinal, gap);
 
     // Freeze completed sentences inside the open phrase
     while (true) {
-      const open = this.getOpenText();
-      const cut = this.cutFirstSentence(open);
+      const cut = this.cutFirstSentence(this.getOpenText());
       if (!cut) break;
       frozen.push(cut.sentence);
       this.appendConfirmed(cut.sentence);
-      const rest = wordsOf(cut.rest);
-      const tipKeep = Math.min(TIP_WORDS, rest.length);
-      this.openConfirmed = rest.slice(0, Math.max(0, rest.length - tipKeep));
-      this.tip = rest.slice(Math.max(0, rest.length - tipKeep));
+      this.consumeOpen(wordsOf(cut.sentence).length);
     }
 
     if (wordsOf(this.getOpenText()).length >= MAX_OPEN_WORDS) {
@@ -176,8 +251,7 @@ export class SourceTape {
       if (block) {
         frozen.push(block);
         this.appendConfirmed(block);
-        this.openConfirmed = [];
-        this.tip = [];
+        this.consumeOpen(wordsOf(block).length);
       }
     }
 
@@ -189,12 +263,131 @@ export class SourceTape {
     return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
   }
 
+  private absorbUtterance(incoming: string[], isFinal: boolean, gap: number) {
+    // Text that reached the tape another way (ASR fallback) stays open, and the
+    // browser may resend its end: treat it like an open utterance.
+    let adopted = false;
+    if (!this.utt.length && !this.carry.length && this.openWords().length) {
+      this.carry = this.openWords();
+      adopted = true;
+    }
+
+    const prevOpen = (!this.uttClosed && this.utt.length > 0) || adopted;
+    const sameUtterance =
+      !adopted &&
+      prevOpen &&
+      (fuzzyPrefix(this.utt, incoming) >= Math.min(2, this.utt.length, incoming.length) ||
+        shiftedStart(this.utt, incoming));
+    // Revision of the utterance on screen: replace it, keep frozen words frozen.
+    // If the frozen words cannot be found in it, it is not the same utterance.
+    const cut = sameUtterance ? this.alignFrozen(incoming) : -1;
+
+    if (cut >= 0) {
+      this.utt = incoming;
+      this.uttFrozen = cut;
+    } else {
+      // A new utterance. It may only resend words already said (a late final,
+      // a restart of the recognizer): keep just what is new.
+      if (this.utt.length) this.prevUttLength = this.utt.length;
+      if (!isFinal || gap > RESEGMENT_GAP_MS) this.resegmenting = false;
+      if (isFinal && prevOpen) this.resegmenting = true;
+      const fresh = this.dropResent(incoming, prevOpen, gap);
+      this.carry = this.openWords();
+      this.utt = fresh;
+      this.uttFrozen = 0;
+    }
+    this.uttClosed = isFinal;
+    this.layoutOpen();
+  }
+
+  /** Where the frozen part of the utterance ends inside a revised hypothesis; -1 if absent. */
+  private alignFrozen(incoming: string[]) {
+    if (!this.uttFrozen) return 0;
+    if (fuzzyPrefix(this.utt, incoming) >= this.uttFrozen) return this.uttFrozen;
+    if (this.uttFrozen >= this.utt.length && incoming.length <= this.uttFrozen && fuzzyPrefix(incoming, this.utt) === incoming.length) {
+      return incoming.length; // a shorter resend of words already frozen
+    }
+    const anchor = this.utt.slice(Math.max(0, this.uttFrozen - 3), this.uttFrozen);
+    let bestEnd = -1;
+    let bestDistance = Infinity;
+    for (let i = 0; i + anchor.length <= incoming.length; i += 1) {
+      let ok = true;
+      for (let k = 0; k < anchor.length; k += 1) {
+        if (!wordMatch(anchor[k], incoming[i + k])) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) continue;
+      const end = i + anchor.length;
+      const distance = Math.abs(end - this.uttFrozen);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestEnd = end;
+      }
+    }
+    return bestEnd;
+  }
+
+  /**
+   * Strip what a new utterance only resends. A resend is likely while the
+   * previous utterance was still open or right after it (a burst of finals);
+   * after a real pause the speaker repeating himself is speech, kept whole.
+   */
+  private dropResent(incoming: string[], prevOpen: boolean, gap: number) {
+    const resendLikely = prevOpen || this.resegmenting || gap <= RESEGMENT_GAP_MS;
+    if (!resendLikely) return incoming;
+    const window = RESEND_WINDOW + Math.max(this.utt.length, this.prevUttLength);
+    const known = [...this.confirmed.slice(-window), ...this.openWords()];
+    const { length, atEnd } = longestKnownPrefix(known, incoming);
+    const whole = length === incoming.length;
+    // 4+ words already said in a row, a whole 3-word resend, or a restart that
+    // overlaps the very last words: that part was heard already.
+    const burst = prevOpen || this.resegmenting;
+    // Inside a burst: a 4+ word run, a whole 3-word resend, or an overlap with the
+    // very end. Right after a closed sentence: only a long run ending at the end.
+    const strip = burst
+      ? length >= 4 || (whole && length >= 3) || (atEnd && (whole || length >= 2 || (this.resegmenting && length >= 1)))
+      : atEnd && length >= 4;
+    if (strip) {
+      return incoming.slice(length);
+    }
+    return incoming;
+  }
+
+  /** Open line = carry + the not-yet-frozen part of the utterance. */
+  private layoutOpen() {
+    const live = this.utt.slice(this.uttFrozen);
+    const words = [...this.carry, ...live];
+    if (this.uttClosed || END_SENTENCE.test(words.at(-1) ?? "")) {
+      this.openConfirmed = words;
+      this.tip = [];
+      return;
+    }
+    const tipKeep = Math.min(TIP_WORDS, live.length);
+    this.openConfirmed = words.slice(0, words.length - tipKeep);
+    this.tip = words.slice(words.length - tipKeep);
+  }
+
+  /** `count` words left the open line (frozen): carry first, then the utterance. */
+  private consumeOpen(count: number) {
+    const fromCarry = Math.min(count, this.carry.length);
+    this.carry = this.carry.slice(fromCarry);
+    this.uttFrozen = Math.min(this.utt.length, this.uttFrozen + count - fromCarry);
+    this.layoutOpen();
+  }
+
   /**
    * ASR that already separates committed words from the unstable tip (WhisperLiveKit).
    * `committed` holds only new words, so nothing is matched or guessed: append, never repeat.
    */
   pushCommitted(committed: string, tip: string, now = Date.now()): TapePushResult {
     this.lastInputAt = now;
+    // Another ASR now owns the open line: forget the Web Speech utterance.
+    this.carry = [];
+    this.utt = [];
+    this.uttFrozen = 0;
+    this.uttClosed = true;
     let fresh = wordsOf(committed);
     const nextTip = wordsOf(tip);
     const frozen: string[] = [];
@@ -285,6 +478,9 @@ export class SourceTape {
     this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
+    // The utterance may keep growing after the pause: only new words follow.
+    this.carry = [];
+    this.uttFrozen = this.utt.length;
     this.lastOpenKey = "";
     return this.snapshot(frozen, false, true);
   }
@@ -300,64 +496,15 @@ export class SourceTape {
     this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
+    // The utterance may keep growing after the pause: only new words follow.
+    this.carry = [];
+    this.uttFrozen = this.utt.length;
     this.lastOpenKey = "";
     return this.snapshot(frozen, false, true);
   }
 
-  private absorb(incoming: string[], isFinal: boolean) {
-    // Chrome resends the whole current utterance, including words already frozen.
-    // Keep only the part after that confirmed tail — never paste the sentence again.
-    const confirmedOverlap = overlapSuffixPrefix(this.confirmed, incoming);
-    if (confirmedOverlap >= 3) {
-      const fresh = incoming.slice(confirmedOverlap);
-      if (fresh.length) this.splitOpen(fresh, isFinal);
-      return;
-    }
-
-    const openNow = this.openWords();
-    const revised = sharedPrefixLen(openNow, incoming);
-    const dropped = openNow.length - revised;
-    const extendsOpen = revised > 0 && revised === openNow.length;
-    const revisesTail = revised >= 2 && dropped <= 4;
-    // "testa" → "testando": the unstable tip was rewritten, not a second sentence.
-    const replacesTip =
-      this.openConfirmed.length === 0 &&
-      openNow.length > 0 &&
-      openNow.length <= 3 &&
-      revised === 0 &&
-      sameStem(openNow[0] ?? "", incoming[0] ?? "");
-    if (openNow.length && (extendsOpen || revisesTail || replacesTip)) {
-      this.splitOpen(incoming, isFinal);
-      return;
-    }
-
-    const absorbed = [...this.confirmed, ...openNow];
-    const overlap = overlapSuffixPrefix(absorbed, incoming);
-    const fresh = incoming.slice(overlap);
-    if (!fresh.length) return;
-
-    // New fragment that does not repeat the open line (Chrome restarted mid-sentence).
-    this.splitOpen([...openNow, ...fresh], isFinal);
-  }
-
   private openWords() {
     return [...this.openConfirmed, ...this.tip];
-  }
-
-  private splitOpen(words: string[], isFinal: boolean) {
-    if (!words.length) {
-      this.openConfirmed = [];
-      this.tip = [];
-      return;
-    }
-    if (isFinal || END_SENTENCE.test(words.at(-1) ?? "")) {
-      this.openConfirmed = words;
-      this.tip = [];
-      return;
-    }
-    const tipKeep = Math.min(TIP_WORDS, words.length);
-    this.openConfirmed = words.slice(0, words.length - tipKeep);
-    this.tip = words.slice(words.length - tipKeep);
   }
 
   private cutFirstSentence(text: string): { sentence: string; rest: string } | null {
@@ -376,9 +523,9 @@ export class SourceTape {
   private appendConfirmed(text: string) {
     const words = wordsOf(text);
     if (!words.length) return;
-    // Never drop already-confirmed words — only append
-    const overlap = overlapSuffixPrefix(this.confirmed, words);
-    this.confirmed.push(...words.slice(overlap));
+    // Frozen text is exact (no resend reaches here): append as is, so a word
+    // the speaker really repeated ("di no. no no") is kept.
+    this.confirmed.push(...words);
     if (this.confirmed.length > 2000) {
       this.confirmed = this.confirmed.slice(-1200);
     }

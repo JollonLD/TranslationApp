@@ -1027,7 +1027,9 @@ const CUE_NUMBER = new RegExp(String.raw`\b(${CUE})\s+(${NUMBER_PHRASE.source})\
  * translated. Conservative: only accents, split words and verse numbers.
  */
 export function correctAsrTerms(text: string, source: LanguageCode) {
-  if (source !== "pt" || !text.trim()) return text;
+  if (!text.trim()) return text;
+  if (source === "it") return correctItalianAsrTerms(text);
+  if (source !== "pt") return text;
   let out = applyFixes(text, ASR_PHRASES);
   out = applyFixes(out, ASR_BOOKS);
   // "capítulo três versículo dezesseis" → "capítulo 3 versículo 16"
@@ -1041,4 +1043,97 @@ export function correctAsrTerms(text: string, source: LanguageCode) {
     out = next;
   }
   return out;
+}
+
+// ---------------------------------------------------------------- Italian
+
+const IT_UNITS: Record<string, number> = {
+  uno: 1, una: 1, due: 2, tre: 3, "tré": 3, quattro: 4, cinque: 5, sei: 6, sette: 7, otto: 8, nove: 9,
+  dieci: 10, undici: 11, dodici: 12, tredici: 13, quattordici: 14, quindici: 15, sedici: 16,
+  diciassette: 17, diciotto: 18, diciannove: 19,
+};
+const IT_TENS: Record<string, number> = {
+  venti: 20, trenta: 30, quaranta: 40, cinquanta: 50, sessanta: 60, settanta: 70, ottanta: 80, novanta: 90,
+};
+
+/** Every single-word Italian number 1..199 ("ventuno", "ventotto", "centodiciannove") → value. */
+const IT_NUMBER_WORDS: Map<string, number> = (() => {
+  const map = new Map<string, number>();
+  const tens: [string, number][] = [["", 0], ...Object.entries(IT_TENS)];
+  const units: [string, number][] = [["", 0], ...Object.entries(IT_UNITS)];
+  for (const [h, hv] of [["", 0], ["cento", 100]] as [string, number][]) {
+    for (const [t, tv] of tens) {
+      for (const [u, uv] of units) {
+        if (tv && uv >= 10) continue; // "venti" + "dodici" is not a number
+        if (!h && !t && !u) continue;
+        const elide = t && /^[uo]/.test(u); // ventuno, ventotto
+        map.set(h + (elide ? t.slice(0, -1) : t) + u, hv + tv + uv);
+      }
+    }
+  }
+  return map;
+})();
+
+export function parseItNumber(word: string): number | null {
+  return IT_NUMBER_WORDS.get(word.toLowerCase()) ?? null;
+}
+
+const IT_NUMBER_ALT = [...IT_NUMBER_WORDS.keys()].sort((a, b) => b.length - a.length).join("|");
+const IT_CUE_NUMBER = new RegExp(
+  String.raw`(?<![\p{L}\p{N}])(capitol[oi]|versett[oi]|salm[oi])\s+(${IT_NUMBER_ALT})(?![\p{L}\p{N}])`,
+  "giu",
+);
+
+const IT_NAME_PREV = new Set(["la", "una", "un", "della", "dalla", "nella", "sulla", "mia", "sua", "questa", "quella", "con", "per", "da", "di", "e", "o", "anche", "ho", "ha", "hai"]);
+
+const IT_START = String.raw`(?<![\p{L}\p{N}'’])`;
+const IT_END = String.raw`(?![\p{L}\p{N}'’])`;
+const IT_CHAPTER = String.raw`(?=\s+(?:capitol[oi]|\d))`;
+
+/** Lowercase / unaccented book names; only lowercase input is touched, so the speaker's capitals stay. */
+const IT_BOOKS: Fix[] = [
+  ...["genesi", "esodo", "levitico", "deuteronomio", "neemia", "isaia", "geremia", "ezechiele", "matteo", "filippesi", "timoteo", "apocalisse"].map(
+    (b): Fix => [new RegExp(`${IT_START}${b}${IT_END}`, "gu"), b[0].toUpperCase() + b.slice(1)],
+  ),
+  // Also common words / names: only with a chapter cue.
+  [new RegExp(String.raw`${IT_START}proverbi${IT_END}(?=\s+(?:capitol[oi]|\d))|(?<=\blibro dei )proverbi${IT_END}`, "gu"), "Proverbi"],
+  [new RegExp(`${IT_START}giacomo${IT_END}${IT_CHAPTER}`, "gu"), "Giacomo"],
+  [new RegExp(`${IT_START}giovanni${IT_END}${IT_CHAPTER}`, "gu"), "Giovanni"],
+  [new RegExp(String.raw`${IT_START}salm[oi]${IT_END}(?=\s+\d)`, "gu"), (m) => `S${m.slice(1)}`],
+  [
+    new RegExp(String.raw`${IT_START}(?:romani|corinzi|galati|efesini|colossesi|tessalonicesi|ebrei)${IT_END}(?:(?<=\blettera (?:ai|agli) \p{L}+)|(?=\s+\d))`, "gu"),
+    (m) => m[0].toUpperCase() + m.slice(1),
+  ],
+];
+
+/** Edge Web Speech capitalization glitches, only as isolated all-caps tokens. */
+const IT_GLITCH: Record<string, string> = { EE: "e", EA: "e a", EI: "e i", EO: "e o", AA: "a", AAA: "a" };
+
+function correctItalianAsrTerms(text: string) {
+  let out = text;
+  if (/\p{Ll}/u.test(out)) {
+    const src = out;
+    out = out.replace(/(?<![\p{L}\p{N}'’])(EE|EA|EI|EO|AAA|AA)(?![\p{L}\p{N}'’])/gu, (_m, tok: string, offset: number) => {
+      const fixed = IT_GLITCH[tok];
+      const atStart = /(?:^|[.!?…]\s+)$/.test(src.slice(0, offset));
+      return atStart ? fixed[0].toUpperCase() + fixed.slice(1) : fixed;
+    });
+  }
+  // Neemia: only with a clear context; the illness "anemia" stays.
+  out = out.replace(/(?<![\p{L}\p{N}'’])(libro di|arriva|arrivava|arrivò) anemia(?![\p{L}\p{N}'’])/giu, (_m, ctx: string) => `${ctx} Neemia`);
+  const src2 = out;
+  out = out.replace(/(?<![\p{L}\p{N}'’])anemia(\s+(?:disse|dice|era)(?![\p{L}\p{N}'’]))/giu, (m, rest: string, offset: number) => {
+    const prev = src2.slice(0, offset).match(/(\p{L}+)\s+$/u)?.[1]?.toLowerCase();
+    return prev && IT_NAME_PREV.has(prev) ? m : `Neemia${rest}`;
+  });
+  out = out.replace(/(?<![\p{L}\p{N}'’])figlio un incendio(?![\p{L}\p{N}'’])/giu, (m) => `${m.slice(0, 6)} unigenito`);
+  const src3 = out;
+  out = out.replace(/(?<![\p{L}\p{N}'’])allogia del signore(?![\p{L}\p{N}'’])/giu, (_m, offset: number) =>
+    /(?:^|[.!?…]\s+)$/.test(src3.slice(0, offset)) ? "La gioia del Signore" : "la gioia del Signore",
+  );
+  out = out.replace(IT_CUE_NUMBER, (whole, cue: string, spoken: string) => {
+    const n = parseItNumber(spoken);
+    return n === null ? whole : `${cue} ${n}`;
+  });
+  return applyFixes(out, IT_BOOKS);
 }
