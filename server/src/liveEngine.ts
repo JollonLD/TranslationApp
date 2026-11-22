@@ -197,12 +197,12 @@ export class LiveEngine {
     if (snap.open.trim()) {
       // Church vocabulary fixed once, so the source shown and translated agree.
       const lang = this.hooks.getSourceLang();
-      const open = correctAsrTerms(snap.open, lang);
+      const open = correctAsrTerms(stripRepeats(snap.open), lang);
       this.liveOriginal = open;
       if (snap.openChanged || !this.liveId) {
         if (!this.liveId) this.liveId = makeId(`live-${this.code}`);
         this.emitLiveShell(open);
-        this.scheduleTranslate(snap.openStable ? correctAsrTerms(snap.openStable, lang) : open, false);
+        this.scheduleTranslate(snap.openStable ? correctAsrTerms(stripRepeats(snap.openStable), lang) : open, false);
       }
     } else if (snap.frozeOpen) {
       this.liveOriginal = "";

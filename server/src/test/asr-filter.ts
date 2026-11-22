@@ -18,15 +18,14 @@ const bad = [
   "...",
   "…",
   "[Música]",
-  "Música",
   "♪",
   "♪ ♪",
-  "Thanks for watching!",
-  "Subtitles by the Amara.org community",
-  "amém amém amém amém amém",
-  "Sim, sim, sim, sim.",
+  "(aplausos)",
+  "sim sim sim sim sim sim sim sim sim sim sim sim sim sim sim sim",
 ];
 for (const s of bad) check(`hallucination: ${s}`, isHallucination(s, "pt"));
+check("en pattern in an English sermon", isHallucination("Thanks for watching!", "en"));
+check("en subtitles credit", isHallucination("Subtitles by the Amara.org community", "en"));
 
 const good = [
   "Obrigado, Senhor",
@@ -36,19 +35,35 @@ const good = [
   "Música é uma forma de adoração",
   "Thank you, Jesus",
   "Tchau",
+  "Música",
+  "Silêncio.",
+  "Thank you",
+  "Aleluia, aleluia, aleluia, aleluia!",
+  "Amém amém amém amém",
+  "Santo, santo, santo, santo é o Senhor",
+  "aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia aleluia",
   "",
 ];
-for (const s of good) {
-  // "Tchau" alone is also a Whisper artifact; accepted either way, only test others.
-  if (s === "Tchau") continue;
-  check(`legit: ${s}`, !isHallucination(s, "pt"));
-}
+for (const s of good) check(`legit: ${s}`, !isHallucination(s, "pt"));
 
-check("strip word x5", stripRepeats("eu disse não não não não não e fui") === "eu disse não e fui");
-check("strip phrase x4", stripRepeats("vamos orar vamos orar vamos orar vamos orar agora") === "vamos orar agora");
-check("keep x3", stripRepeats("amém amém amém") === "amém amém amém");
-check("keep normal", stripRepeats("Deus é bom o tempo todo") === "Deus é bom o tempo todo");
-check("no partial word", stripRepeats("a a a a ab") === "a ab");
+// Speech repeats stay whole; only long Whisper loops are shortened (to three).
+const keep = [
+  "Santo, santo, santo, santo é o Senhor",
+  "Eu te amo, eu te amo, eu te amo, eu te amo, Senhor",
+  "Amém, amém, amém, amém.",
+  "eu disse não não não não não e fui",
+  "Deus é bom o tempo todo",
+];
+for (const s of keep) check(`speech kept: ${s}`, stripRepeats(s) === s);
+check(
+  "word loop x10 → 3",
+  stripRepeats("e então não não não não não não não não não não fui") === "e então não não não fui",
+);
+check(
+  "phrase loop x7 → 3",
+  stripRepeats("vamos orar vamos orar vamos orar vamos orar vamos orar vamos orar vamos orar agora") ===
+    "vamos orar vamos orar vamos orar agora",
+);
 
 if (failed) {
   console.error(`${failed} check(s) failed`);
