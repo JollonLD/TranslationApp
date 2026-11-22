@@ -12,6 +12,7 @@ import { polishChurchTerms } from "./churchGlossary.js";
 import { translateNllb } from "./nllbTranslate.js";
 import { rivaCanPivot, translateRiva } from "./rivaTranslate.js";
 import { clearSermonCard, refreshSermonCard } from "./sermonMemory.js";
+import { StableText } from "./stableCaption.js";
 import {
   clearSourceTape,
   getSourceTape,
@@ -48,13 +49,22 @@ type EnglishPivot = {
   english: string;
 };
 
-/** Hide last tip words until freeze (flicker control). */
-function displayTranslation(text: string, frozen: boolean) {
-  if (frozen) return text.trim();
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (words.length <= 3) return words.join(" ");
-  return words.slice(0, -2).join(" ");
+/** Only punctuation or capitals changed: same words, same order. */
+export function sameWords(a: string, b: string) {
+  const norm = (t: string) =>
+    t
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(" ");
+  return norm(a) === norm(b);
 }
+
+/** Pause with no newer translation before the open line is shown whole. */
+const SETTLE_MS = 450;
 
 function makeId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -100,6 +110,12 @@ export class LiveEngine {
   private queuedText = "";
   private lastLoggedHeard = "";
   private lastLoggedLive = new Map<LanguageCode, string>();
+  /** Per language display stabilizer for the current live line. */
+  private stable = new Map<LanguageCode, StableText>();
+  private stableLineId = "";
+  private settleTimers = new Map<LanguageCode, ReturnType<typeof setTimeout>>();
+  /** The last frozen block was cut at a clause break: the next one continues it. */
+  private clauseOpen = false;
 
   constructor(code: string, hooks: LiveEngineHooks) {
     this.code = code;
@@ -157,6 +173,7 @@ export class LiveEngine {
     if (this.translateTimer) clearTimeout(this.translateTimer);
     this.translateTimer = null;
     this.queuedText = "";
+    this.clearSettle();
     this.lastLoggedHeard = "";
     this.lastLoggedLive.clear();
     for (const flight of this.flights.values()) {
@@ -262,6 +279,7 @@ export class LiveEngine {
       return;
     }
 
+    this.clearSettle(target);
     const generation = (this.generations.get(target) ?? 0) + 1;
     this.generations.set(target, generation);
     const flight: LangFlight = {
@@ -322,12 +340,15 @@ export class LiveEngine {
         flight.text.toLowerCase().startsWith(original.toLowerCase());
 
       if (translated && stillRelevant) {
-        const publish = displayTranslation(polishChurchTerms(translated, target), false);
+        // Show only words two translations agree on; words already read never jump.
+        const polished = polishChurchTerms(translated, target);
+        const stable = this.stableFor(target);
+        const quiet = getSourceTape(this.code).msSinceLastInput() >= SETTLE_MS;
+        // Speech already paused (or the listener just switched language): show it whole.
+        const publish = !current.nextText && quiet ? stable.settle(polished) : stable.update(polished);
+        if (!current.nextText && !quiet) this.armSettle(target, source, original, polished);
         this.logPair("ao vivo", target, original, publish);
-        this.publishLiveLang(target, source, original, publish, false);
-      } else if (!translated && source !== target) {
-        // Drop a previous sentence's translation instead of leaving it on screen.
-        this.publishLiveLang(target, source, original, "", false);
+        if (publish) this.publishLiveLang(target, source, original, publish, false);
       }
     } catch {
       /* aborted or network — the queued text is translated next */
@@ -339,6 +360,51 @@ export class LiveEngine {
         this.startFlight(chain, source, target);
       }
     }
+  }
+
+  /**
+   * Nothing newer to translate for a moment: the speaker paused mid-sentence.
+   * The newest translation covers everything heard, so show it whole.
+   */
+  private armSettle(target: LanguageCode, source: LanguageCode, original: string, hypothesis: string) {
+    this.clearSettle(target);
+    const lineId = this.liveId;
+    this.settleTimers.set(
+      target,
+      setTimeout(() => {
+        this.settleTimers.delete(target);
+        if (this.closed || this.liveId !== lineId || this.flights.has(target)) return;
+        const stable = this.stableFor(target);
+        const before = stable.current();
+        const shown = stable.settle(hypothesis);
+        if (shown && shown !== before) {
+          this.logPair("ao vivo", target, original, shown);
+          this.publishLiveLang(target, source, original, shown, false);
+        }
+      }, SETTLE_MS),
+    );
+  }
+
+  private clearSettle(target?: LanguageCode) {
+    const targets = target ? [target] : [...this.settleTimers.keys()];
+    for (const lang of targets) {
+      const timer = this.settleTimers.get(lang);
+      if (timer) clearTimeout(timer);
+      this.settleTimers.delete(lang);
+    }
+  }
+
+  private stableFor(target: LanguageCode) {
+    if (this.stableLineId !== this.liveId) {
+      this.stable.clear();
+      this.stableLineId = this.liveId;
+    }
+    let text = this.stable.get(target);
+    if (!text) {
+      text = new StableText();
+      this.stable.set(target, text);
+    }
+    return text;
   }
 
   private logPair(kind: "ao vivo", target: LanguageCode, original: string, translated: string) {
@@ -373,8 +439,10 @@ export class LiveEngine {
   }
 
   private async freezePhrase(phrase: string) {
-    const original = finishSentence(phrase.trim());
+    const raw = phrase.trim();
+    const original = finishSentence(raw, this.clauseOpen);
     if (!original) return;
+    this.clauseOpen = /[,;:]$/.test(raw);
 
     const source = this.hooks.getSourceLang();
     const targets = this.hooks.getTargets().filter((l) => l !== source);
@@ -383,6 +451,7 @@ export class LiveEngine {
     this.liveOriginal = "";
 
     // Drop queued live requests — this sentence gets its own translation.
+    this.clearSettle();
     if (this.translateTimer) clearTimeout(this.translateTimer);
     this.translateTimer = null;
     this.queuedText = "";
@@ -485,15 +554,18 @@ export class LiveEngine {
     if (!shaped) return;
 
     let changed = false;
+    // The listener may already have read this line: accept punctuation and
+    // capitals only. A model that drops, adds or swaps words is ignored.
     const nextSource = shaped[source];
-    if (nextSource && nextSource !== caption.original) {
+    if (nextSource && nextSource !== caption.original && sameWords(nextSource, caption.original)) {
       caption.original = nextSource;
       caption.translations[source] = nextSource;
       changed = true;
     }
     for (const target of targets) {
       const next = shaped[target];
-      if (next && next !== caption.translations[target]) {
+      const before = caption.translations[target] ?? "";
+      if (next && next !== before && sameWords(next, before)) {
         caption.translations[target] = next;
         changed = true;
       }
