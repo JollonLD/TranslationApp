@@ -55456,8 +55456,15 @@ var EN_PATTERNS = [
   /^subscribe to (the|my) channel$/,
   /^bye( bye)+$/
 ];
-var PATTERNS = { pt: PT_PATTERNS, en: EN_PATTERNS };
-var LITURGICAL = /* @__PURE__ */ new Set(["aleluia", "amem", "santo", "santa", "gloria", "hosana", "digno", "jesus", "senhor", "aleluya", "amen", "holy"]);
+var IT_PATTERNS = [
+  /^sottotitoli creati dalla comunita amara org$/,
+  /^sottotitoli (e revisione )?a cura di .+$/,
+  /^grazie (a tutti )?per la visione$/,
+  /^iscriviti al canale$/,
+  /^(ciao )+ciao$/
+];
+var PATTERNS = { pt: PT_PATTERNS, en: EN_PATTERNS, it: IT_PATTERNS };
+var LITURGICAL = /* @__PURE__ */ new Set(["aleluia", "amem", "santo", "santa", "gloria", "hosana", "digno", "jesus", "senhor", "aleluya", "amen", "holy", "alleluia", "alleluja", "osanna"]);
 var LOOP_WORD_RUN = 8;
 var LOOP_CHUNK_RUN = 6;
 function isHallucination(sentence, lang = "pt") {
@@ -56483,7 +56490,9 @@ var BOOK_CUES = [
 var CUE = String.raw`(?:[Cc]ap[ií]tulo|[Vv]ers[ií]culos?|[Vv]erso|[Ss]almos?|(?:${BOOK_CUES})\s+\d{1,3}|[123]\s*(?:${BOOK_CUES}))`;
 var CUE_NUMBER = new RegExp(String.raw`\b(${CUE})\s+(${NUMBER_PHRASE.source})\b`, "g");
 function correctAsrTerms(text, source) {
-  if (source !== "pt" || !text.trim()) return text;
+  if (!text.trim()) return text;
+  if (source === "it") return correctItalianAsrTerms(text);
+  if (source !== "pt") return text;
   let out = applyFixes(text, ASR_PHRASES);
   out = applyFixes(out, ASR_BOOKS);
   for (let i = 0; i < 3; i += 1) {
@@ -56496,6 +56505,110 @@ function correctAsrTerms(text, source) {
     out = next;
   }
   return out;
+}
+var IT_UNITS = {
+  uno: 1,
+  una: 1,
+  due: 2,
+  tre: 3,
+  "tr\xE9": 3,
+  quattro: 4,
+  cinque: 5,
+  sei: 6,
+  sette: 7,
+  otto: 8,
+  nove: 9,
+  dieci: 10,
+  undici: 11,
+  dodici: 12,
+  tredici: 13,
+  quattordici: 14,
+  quindici: 15,
+  sedici: 16,
+  diciassette: 17,
+  diciotto: 18,
+  diciannove: 19
+};
+var IT_TENS = {
+  venti: 20,
+  trenta: 30,
+  quaranta: 40,
+  cinquanta: 50,
+  sessanta: 60,
+  settanta: 70,
+  ottanta: 80,
+  novanta: 90
+};
+var IT_NUMBER_WORDS = (() => {
+  const map = /* @__PURE__ */ new Map();
+  const tens = [["", 0], ...Object.entries(IT_TENS)];
+  const units = [["", 0], ...Object.entries(IT_UNITS)];
+  for (const [h, hv] of [["", 0], ["cento", 100]]) {
+    for (const [t, tv] of tens) {
+      for (const [u, uv] of units) {
+        if (tv && uv >= 10) continue;
+        if (!h && !t && !u) continue;
+        const elide = t && /^[uo]/.test(u);
+        map.set(h + (elide ? t.slice(0, -1) : t) + u, hv + tv + uv);
+      }
+    }
+  }
+  return map;
+})();
+function parseItNumber(word) {
+  return IT_NUMBER_WORDS.get(word.toLowerCase()) ?? null;
+}
+var IT_NUMBER_ALT = [...IT_NUMBER_WORDS.keys()].sort((a, b) => b.length - a.length).join("|");
+var IT_CUE_NUMBER = new RegExp(
+  String.raw`(?<![\p{L}\p{N}])(capitol[oi]|versett[oi]|salm[oi])\s+(${IT_NUMBER_ALT})(?![\p{L}\p{N}])`,
+  "giu"
+);
+var IT_NAME_PREV = /* @__PURE__ */ new Set(["la", "una", "un", "della", "dalla", "nella", "sulla", "mia", "sua", "questa", "quella", "con", "per", "da", "di", "e", "o", "anche", "ho", "ha", "hai"]);
+var IT_START = String.raw`(?<![\p{L}\p{N}'’])`;
+var IT_END = String.raw`(?![\p{L}\p{N}'’])`;
+var IT_CHAPTER = String.raw`(?=\s+(?:capitol[oi]|\d))`;
+var IT_BOOKS = [
+  ...["genesi", "esodo", "levitico", "deuteronomio", "neemia", "isaia", "geremia", "ezechiele", "matteo", "filippesi", "timoteo", "apocalisse"].map(
+    (b) => [new RegExp(`${IT_START}${b}${IT_END}`, "gu"), b[0].toUpperCase() + b.slice(1)]
+  ),
+  // Also common words / names: only with a chapter cue.
+  [new RegExp(String.raw`${IT_START}proverbi${IT_END}(?=\s+(?:capitol[oi]|\d))|(?<=\blibro dei )proverbi${IT_END}`, "gu"), "Proverbi"],
+  [new RegExp(`${IT_START}giacomo${IT_END}${IT_CHAPTER}`, "gu"), "Giacomo"],
+  [new RegExp(`${IT_START}giovanni${IT_END}${IT_CHAPTER}`, "gu"), "Giovanni"],
+  [new RegExp(String.raw`${IT_START}salm[oi]${IT_END}(?=\s+\d)`, "gu"), (m) => `S${m.slice(1)}`],
+  [
+    new RegExp(String.raw`${IT_START}(?:romani|corinzi|galati|efesini|colossesi|tessalonicesi|ebrei)${IT_END}(?:(?<=\blettera (?:ai|agli) \p{L}+)|(?=\s+\d))`, "gu"),
+    (m) => m[0].toUpperCase() + m.slice(1)
+  ]
+];
+var IT_GLITCH = { EE: "e", EA: "e a", EI: "e i", EO: "e o", AA: "a", AAA: "a" };
+function correctItalianAsrTerms(text) {
+  let out = text;
+  if (/\p{Ll}/u.test(out)) {
+    const src = out;
+    out = out.replace(/(?<![\p{L}\p{N}'’])(EE|EA|EI|EO|AAA|AA)(?![\p{L}\p{N}'’])/gu, (_m, tok, offset) => {
+      const fixed = IT_GLITCH[tok];
+      const atStart = /(?:^|[.!?…]\s+)$/.test(src.slice(0, offset));
+      return atStart ? fixed[0].toUpperCase() + fixed.slice(1) : fixed;
+    });
+  }
+  out = out.replace(/(?<![\p{L}\p{N}'’])(libro di|arriva|arrivava|arrivò) anemia(?![\p{L}\p{N}'’])/giu, (_m, ctx) => `${ctx} Neemia`);
+  const src2 = out;
+  out = out.replace(/(?<![\p{L}\p{N}'’])anemia(\s+(?:disse|dice|era)(?![\p{L}\p{N}'’]))/giu, (m, rest, offset) => {
+    const prev = src2.slice(0, offset).match(/(\p{L}+)\s+$/u)?.[1]?.toLowerCase();
+    return prev && IT_NAME_PREV.has(prev) ? m : `Neemia${rest}`;
+  });
+  out = out.replace(/(?<![\p{L}\p{N}'’])figlio un incendio(?![\p{L}\p{N}'’])/giu, (m) => `${m.slice(0, 6)} unigenito`);
+  const src3 = out;
+  out = out.replace(
+    /(?<![\p{L}\p{N}'’])allogia del signore(?![\p{L}\p{N}'’])/giu,
+    (_m, offset) => /(?:^|[.!?…]\s+)$/.test(src3.slice(0, offset)) ? "La gioia del Signore" : "la gioia del Signore"
+  );
+  out = out.replace(IT_CUE_NUMBER, (whole, cue, spoken) => {
+    const n = parseItNumber(spoken);
+    return n === null ? whole : `${cue} ${n}`;
+  });
+  return applyFixes(out, IT_BOOKS);
 }
 
 // server/src/bibleRefs.ts
@@ -56992,18 +57105,6 @@ function bare(word) {
 function joinWords(parts) {
   return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
 }
-function sharedPrefixLen(a, b) {
-  const n = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < n && bare(a[i]) === bare(b[i])) i += 1;
-  return i;
-}
-function sameStem(a, b) {
-  const x = bare(a);
-  const y = bare(b);
-  const n = Math.min(4, x.length, y.length);
-  return n >= 3 && x.slice(0, n) === y.slice(0, n);
-}
 function fold(word) {
   return bare(word).normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
@@ -57014,20 +57115,56 @@ function alike(a, b) {
   const n = Math.min(4, x.length, y.length);
   return n >= 3 && x.slice(0, n) === y.slice(0, n);
 }
-function overlapSuffixPrefix(prev, next) {
-  const max = Math.min(prev.length, next.length, 40);
-  for (let k = max; k >= 1; k -= 1) {
-    let ok = true;
-    for (let i = 0; i < k; i += 1) {
-      if (bare(prev[prev.length - k + i]) !== bare(next[i])) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return k;
-  }
-  return 0;
+function wordMatch(a, b) {
+  return fold(a) === fold(b);
 }
+function cutOff(cut, full) {
+  const x = fold(cut);
+  const y = fold(full);
+  return x.length >= 2 && y.length > x.length && y.startsWith(x);
+}
+function fuzzyPrefix(older, newer) {
+  const n = Math.min(older.length, newer.length);
+  let i = 0;
+  while (i < n) {
+    if (wordMatch(older[i], newer[i])) i += 1;
+    else if (i === older.length - 1 && cutOff(older[i], newer[i])) i += 1;
+    else break;
+  }
+  return i;
+}
+function shiftedStart(older, newer) {
+  for (let off = 1; off <= 2; off += 1) {
+    const need = (n) => Math.min(3, n);
+    if (older.length - off >= 2 && newer.length > off && fuzzyPrefix(older.slice(off), newer.slice(off)) >= need(older.length - off)) return true;
+    if (newer.length > off && fuzzyPrefix(older, newer.slice(off)) >= need(older.length) && older.length >= 2) return true;
+    if (older.length > off && fuzzyPrefix(older.slice(off), newer) >= need(older.length - off) && older.length - off >= 2) return true;
+  }
+  return false;
+}
+function longestKnownPrefix(known, incoming) {
+  let best = 0;
+  let bestAtEnd = false;
+  for (let s = 0; s < known.length; s += 1) {
+    if (!wordMatch(known[s], incoming[0] ?? "")) continue;
+    let k = 0;
+    while (s + k < known.length && k < incoming.length && wordMatch(known[s + k], incoming[k])) k += 1;
+    if (k > best || k === best && s + k === known.length) {
+      best = k;
+      bestAtEnd = s + k === known.length;
+    }
+  }
+  return { length: best, atEnd: bestAtEnd };
+}
+function cleanWebSpeech(text) {
+  return text.split(/\s+/).map((token) => {
+    const m = token.match(/^(\S+?)\.(?:com|ca)([.,!?…]*)$/i);
+    if (!m) return token;
+    return m[1].length >= 14 ? "" : `${m[1]}${m[2]}`;
+  }).filter(Boolean).join(" ");
+}
+var RESEGMENT_GAP_MS = 1500;
+var RESEND_WINDOW = 60;
 var SourceTape = class {
   /** Permanently confirmed words (whole session, bounded). */
   confirmed = [];
@@ -57039,6 +57176,27 @@ var SourceTape = class {
   lastOpenKey = "";
   /** Tip words a pause froze before the ASR committed them. */
   frozenTip = [];
+  /*
+   * Web Speech (Chrome/Edge) sends the whole current utterance on every update.
+   * The tape tracks that utterance so a revision replaces it instead of being
+   * appended, and words already frozen are never pasted again.
+   */
+  /** Open words left over from earlier utterances. */
+  carry = [];
+  /** Latest hypothesis of the current utterance. */
+  utt = [];
+  /** How many words of `utt` were already frozen. */
+  uttFrozen = 0;
+  /** A final closed the utterance: the next update starts a new one. */
+  uttClosed = true;
+  /** Length of the last real utterance: late finals may resend any part of it. */
+  prevUttLength = 0;
+  /**
+   * Finals arriving right after an open interim re-segment what was just shown
+   * (Edge sends punctuated sentences for it). Inside that burst even a one-word
+   * overlap with the end is a resend.
+   */
+  resegmenting = false;
   reset() {
     this.confirmed = [];
     this.openConfirmed = [];
@@ -57046,6 +57204,12 @@ var SourceTape = class {
     this.lastInputAt = 0;
     this.lastOpenKey = "";
     this.frozenTip = [];
+    this.carry = [];
+    this.utt = [];
+    this.uttFrozen = 0;
+    this.uttClosed = true;
+    this.prevUttLength = 0;
+    this.resegmenting = false;
   }
   msSinceLastInput(now = Date.now()) {
     if (!this.lastInputAt) return Number.POSITIVE_INFINITY;
@@ -57068,32 +57232,27 @@ var SourceTape = class {
     return this.confirmed.slice(-maxWords).join(" ");
   }
   push(raw, isFinal, now = Date.now()) {
+    const gap = this.lastInputAt ? now - this.lastInputAt : Number.POSITIVE_INFINITY;
     this.lastInputAt = now;
-    const text = normalize(raw);
+    const text = normalize(cleanWebSpeech(raw));
     const frozen = [];
     if (!text) {
       return this.snapshot(frozen, false, false);
     }
-    const incoming = wordsOf2(text);
-    this.absorb(incoming, isFinal);
+    this.absorbUtterance(wordsOf2(text), isFinal, gap);
     while (true) {
-      const open2 = this.getOpenText();
-      const cut = this.cutFirstSentence(open2);
+      const cut = this.cutFirstSentence(this.getOpenText());
       if (!cut) break;
       frozen.push(cut.sentence);
       this.appendConfirmed(cut.sentence);
-      const rest = wordsOf2(cut.rest);
-      const tipKeep = Math.min(TIP_WORDS, rest.length);
-      this.openConfirmed = rest.slice(0, Math.max(0, rest.length - tipKeep));
-      this.tip = rest.slice(Math.max(0, rest.length - tipKeep));
+      this.consumeOpen(wordsOf2(cut.sentence).length);
     }
     if (wordsOf2(this.getOpenText()).length >= MAX_OPEN_WORDS) {
       const block = this.getOpenText().trim();
       if (block) {
         frozen.push(block);
         this.appendConfirmed(block);
-        this.openConfirmed = [];
-        this.tip = [];
+        this.consumeOpen(wordsOf2(block).length);
       }
     }
     const open = this.getOpenText();
@@ -57102,12 +57261,107 @@ var SourceTape = class {
     this.lastOpenKey = openKey;
     return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
   }
+  absorbUtterance(incoming, isFinal, gap) {
+    let adopted = false;
+    if (!this.utt.length && !this.carry.length && this.openWords().length) {
+      this.carry = this.openWords();
+      adopted = true;
+    }
+    const prevOpen = !this.uttClosed && this.utt.length > 0 || adopted;
+    const sameUtterance = !adopted && prevOpen && (fuzzyPrefix(this.utt, incoming) >= Math.min(2, this.utt.length, incoming.length) || shiftedStart(this.utt, incoming));
+    const cut = sameUtterance ? this.alignFrozen(incoming) : -1;
+    if (cut >= 0) {
+      this.utt = incoming;
+      this.uttFrozen = cut;
+    } else {
+      if (this.utt.length) this.prevUttLength = this.utt.length;
+      if (!isFinal || gap > RESEGMENT_GAP_MS) this.resegmenting = false;
+      if (isFinal && prevOpen) this.resegmenting = true;
+      const fresh = this.dropResent(incoming, prevOpen, gap);
+      this.carry = this.openWords();
+      this.utt = fresh;
+      this.uttFrozen = 0;
+    }
+    this.uttClosed = isFinal;
+    this.layoutOpen();
+  }
+  /** Where the frozen part of the utterance ends inside a revised hypothesis; -1 if absent. */
+  alignFrozen(incoming) {
+    if (!this.uttFrozen) return 0;
+    if (fuzzyPrefix(this.utt, incoming) >= this.uttFrozen) return this.uttFrozen;
+    if (this.uttFrozen >= this.utt.length && incoming.length <= this.uttFrozen && fuzzyPrefix(incoming, this.utt) === incoming.length) {
+      return incoming.length;
+    }
+    const anchor = this.utt.slice(Math.max(0, this.uttFrozen - 3), this.uttFrozen);
+    let bestEnd = -1;
+    let bestDistance = Infinity;
+    for (let i = 0; i + anchor.length <= incoming.length; i += 1) {
+      let ok = true;
+      for (let k = 0; k < anchor.length; k += 1) {
+        if (!wordMatch(anchor[k], incoming[i + k])) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) continue;
+      const end = i + anchor.length;
+      const distance = Math.abs(end - this.uttFrozen);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestEnd = end;
+      }
+    }
+    return bestEnd;
+  }
+  /**
+   * Strip what a new utterance only resends. A resend is likely while the
+   * previous utterance was still open or right after it (a burst of finals);
+   * after a real pause the speaker repeating himself is speech, kept whole.
+   */
+  dropResent(incoming, prevOpen, gap) {
+    const resendLikely = prevOpen || this.resegmenting || gap <= RESEGMENT_GAP_MS;
+    if (!resendLikely) return incoming;
+    const window2 = RESEND_WINDOW + Math.max(this.utt.length, this.prevUttLength);
+    const known = [...this.confirmed.slice(-window2), ...this.openWords()];
+    const { length, atEnd } = longestKnownPrefix(known, incoming);
+    const whole = length === incoming.length;
+    const burst = prevOpen || this.resegmenting;
+    const strip = burst ? length >= 4 || whole && length >= 3 || atEnd && (whole || length >= 2 || this.resegmenting && length >= 1) : atEnd && length >= 4;
+    if (strip) {
+      return incoming.slice(length);
+    }
+    return incoming;
+  }
+  /** Open line = carry + the not-yet-frozen part of the utterance. */
+  layoutOpen() {
+    const live = this.utt.slice(this.uttFrozen);
+    const words = [...this.carry, ...live];
+    if (this.uttClosed || END_SENTENCE.test(words.at(-1) ?? "")) {
+      this.openConfirmed = words;
+      this.tip = [];
+      return;
+    }
+    const tipKeep = Math.min(TIP_WORDS, live.length);
+    this.openConfirmed = words.slice(0, words.length - tipKeep);
+    this.tip = words.slice(words.length - tipKeep);
+  }
+  /** `count` words left the open line (frozen): carry first, then the utterance. */
+  consumeOpen(count) {
+    const fromCarry = Math.min(count, this.carry.length);
+    this.carry = this.carry.slice(fromCarry);
+    this.uttFrozen = Math.min(this.utt.length, this.uttFrozen + count - fromCarry);
+    this.layoutOpen();
+  }
   /**
    * ASR that already separates committed words from the unstable tip (WhisperLiveKit).
    * `committed` holds only new words, so nothing is matched or guessed: append, never repeat.
    */
   pushCommitted(committed, tip, now = Date.now()) {
     this.lastInputAt = now;
+    this.carry = [];
+    this.utt = [];
+    this.uttFrozen = 0;
+    this.uttClosed = true;
     let fresh = wordsOf2(committed);
     const nextTip = wordsOf2(tip);
     const frozen = [];
@@ -57184,6 +57438,8 @@ var SourceTape = class {
     this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
+    this.carry = [];
+    this.uttFrozen = this.utt.length;
     this.lastOpenKey = "";
     return this.snapshot(frozen, false, true);
   }
@@ -57198,49 +57454,13 @@ var SourceTape = class {
     this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
+    this.carry = [];
+    this.uttFrozen = this.utt.length;
     this.lastOpenKey = "";
     return this.snapshot(frozen, false, true);
   }
-  absorb(incoming, isFinal) {
-    const confirmedOverlap = overlapSuffixPrefix(this.confirmed, incoming);
-    if (confirmedOverlap >= 3) {
-      const fresh2 = incoming.slice(confirmedOverlap);
-      if (fresh2.length) this.splitOpen(fresh2, isFinal);
-      return;
-    }
-    const openNow = this.openWords();
-    const revised = sharedPrefixLen(openNow, incoming);
-    const dropped = openNow.length - revised;
-    const extendsOpen = revised > 0 && revised === openNow.length;
-    const revisesTail = revised >= 2 && dropped <= 4;
-    const replacesTip = this.openConfirmed.length === 0 && openNow.length > 0 && openNow.length <= 3 && revised === 0 && sameStem(openNow[0] ?? "", incoming[0] ?? "");
-    if (openNow.length && (extendsOpen || revisesTail || replacesTip)) {
-      this.splitOpen(incoming, isFinal);
-      return;
-    }
-    const absorbed = [...this.confirmed, ...openNow];
-    const overlap = overlapSuffixPrefix(absorbed, incoming);
-    const fresh = incoming.slice(overlap);
-    if (!fresh.length) return;
-    this.splitOpen([...openNow, ...fresh], isFinal);
-  }
   openWords() {
     return [...this.openConfirmed, ...this.tip];
-  }
-  splitOpen(words, isFinal) {
-    if (!words.length) {
-      this.openConfirmed = [];
-      this.tip = [];
-      return;
-    }
-    if (isFinal || END_SENTENCE.test(words.at(-1) ?? "")) {
-      this.openConfirmed = words;
-      this.tip = [];
-      return;
-    }
-    const tipKeep = Math.min(TIP_WORDS, words.length);
-    this.openConfirmed = words.slice(0, words.length - tipKeep);
-    this.tip = words.slice(words.length - tipKeep);
   }
   cutFirstSentence(text) {
     const match = text.match(/^([\s\S]+?[.?!…])(?:\s+|$)/);
@@ -57254,8 +57474,7 @@ var SourceTape = class {
   appendConfirmed(text) {
     const words = wordsOf2(text);
     if (!words.length) return;
-    const overlap = overlapSuffixPrefix(this.confirmed, words);
-    this.confirmed.push(...words.slice(overlap));
+    this.confirmed.push(...words);
     if (this.confirmed.length > 2e3) {
       this.confirmed = this.confirmed.slice(-1200);
     }
@@ -58626,6 +58845,11 @@ var import_node_child_process4 = require("node:child_process");
 var import_node_fs4 = require("node:fs");
 var import_node_path4 = __toESM(require("node:path"), 1);
 var DEFAULT_INIT_PROMPT = "Culto crist\xE3o. Jesus Cristo, Esp\xEDrito Santo, Deus Pai, aleluia, am\xE9m, santifica\xE7\xE3o, salva\xE7\xE3o, gra\xE7a, Evangelho, G\xEAnesis, \xCAxodo, Salmos, Prov\xE9rbios, Isa\xEDas, Mateus, Marcos, Lucas, Jo\xE3o, Atos, Romanos, Cor\xEDntios, G\xE1latas, Ef\xE9sios, Apocalipse.";
+var DEFAULT_INIT_PROMPT_IT = "Culto cristiano. Ges\xF9 Cristo, Spirito Santo, Dio Padre, alleluia, amen, santificazione, salvezza, grazia, Vangelo, Genesi, Esodo, Salmi, Proverbi, Isaia, Neemia, Matteo, Marco, Luca, Giovanni, Atti, Romani, Corinzi, Galati, Efesini, Filippesi, Apocalisse.";
+function defaultInitPrompt(language) {
+  const lang = (language ?? process.env.WLK_LANGUAGE ?? "pt").trim().toLowerCase();
+  return lang === "it" ? DEFAULT_INIT_PROMPT_IT : DEFAULT_INIT_PROMPT;
+}
 var state = {
   mode: "webspeech",
   ready: false,
@@ -58710,7 +58934,7 @@ async function boot() {
     "--pause-segmentation-seconds",
     process.env.WLK_PAUSE_SECONDS?.trim() || "1.2"
   ];
-  const initPrompt = process.env.WLK_INIT_PROMPT ?? DEFAULT_INIT_PROMPT;
+  const initPrompt = process.env.WLK_INIT_PROMPT ?? defaultInitPrompt(language);
   if (initPrompt.trim()) args.push("--static-init-prompt", initPrompt.trim());
   writeLog(`starting WhisperLiveKit: ${bin} ${[...launch, ...args].join(" ")}`);
   child2 = (0, import_node_child_process4.spawn)(bin, [...launch, ...args], {
@@ -58757,13 +58981,13 @@ function wordsOf3(text) {
 function bare2(word) {
   return word.toLowerCase().replace(/[.,;:!?…"“”'«»()]+/g, "");
 }
-function sharedPrefixLen2(a, b) {
+function sharedPrefixLen(a, b) {
   const n = Math.min(a.length, b.length);
   let i = 0;
   while (i < n && bare2(a[i]) === bare2(b[i])) i += 1;
   return i;
 }
-function overlapSuffixPrefix2(prev, next, max = 60) {
+function overlapSuffixPrefix(prev, next, max = 60) {
   const limit = Math.min(prev.length, next.length, max);
   for (let k = limit; k >= 1; k -= 1) {
     let ok = true;
@@ -58791,13 +59015,13 @@ var WlkStream = class {
     const tip = clean(frame.buffer_transcription);
     const prev = this.delivered;
     let fresh;
-    const shared = sharedPrefixLen2(prev, stable);
+    const shared = sharedPrefixLen(prev, stable);
     if (shared === prev.length) {
       fresh = stable.slice(shared);
     } else if (stable.length >= prev.length && prev.length - shared <= 6) {
       fresh = stable.slice(prev.length);
     } else {
-      fresh = stable.slice(overlapSuffixPrefix2(prev, stable));
+      fresh = stable.slice(overlapSuffixPrefix(prev, stable));
     }
     if (stable.length) this.delivered = stable;
     if (!fresh.length && tip === this.lastTip) return null;
