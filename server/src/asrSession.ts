@@ -3,14 +3,16 @@
  */
 import { writeLog } from "./boot.js";
 import { getAsrStatus, whisperWsUrl } from "./whisperSidecar.js";
-import { utteranceFromWlk, type WlkFrame } from "./wlkTranscript.js";
+import { WlkStream, type WlkFrame } from "./wlkTranscript.js";
 
 type AsrLink = {
   ws: WebSocket;
-  lastFull: string;
-  lastStable: string;
-  onText: (text: string, isFinal: boolean) => void;
+  stream: WlkStream;
+  onText: AsrTextHandler;
 };
+
+/** `committed` holds only words never sent before; `tip` replaces the previous tip. */
+export type AsrTextHandler = (committed: string, tip: string) => void;
 
 const links = new Map<string, AsrLink>();
 
@@ -21,7 +23,7 @@ function socketCtor(): typeof WebSocket | null {
 export function openAsrSession(
   code: string,
   language: string,
-  onText: (text: string, isFinal: boolean) => void,
+  onText: AsrTextHandler,
 ) {
   closeAsrSession(code);
   const status = getAsrStatus();
@@ -29,7 +31,7 @@ export function openAsrSession(
   if (!status.ready || status.mode !== "whisperlivekit" || !WS) return false;
 
   const ws = new WS(whisperWsUrl(language));
-  const link: AsrLink = { ws, lastFull: "", lastStable: "", onText };
+  const link: AsrLink = { ws, stream: new WlkStream(), onText };
   links.set(code, link);
 
   ws.addEventListener("message", (event) => {
@@ -43,14 +45,8 @@ export function openAsrSession(
     } catch {
       return;
     }
-    const utterance = utteranceFromWlk(frame, current.lastStable);
-    if (!utterance.full || utterance.full === current.lastFull) {
-      current.lastStable = utterance.stable;
-      return;
-    }
-    current.lastFull = utterance.full;
-    current.lastStable = utterance.stable;
-    current.onText(utterance.full, utterance.isFinal);
+    const delta = current.stream.next(frame);
+    if (delta) current.onText(delta.committed, delta.tip);
   });
 
   ws.addEventListener("error", () => {

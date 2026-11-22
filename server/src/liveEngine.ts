@@ -121,6 +121,19 @@ export class LiveEngine {
     this.armSilence();
   }
 
+  /** WhisperLiveKit: only new committed words plus the current tip. */
+  pushCommitted(committed: string, tip: string) {
+    if (this.closed) return;
+    const heard = [committed.trim(), tip.trim()].filter(Boolean).join(" | ");
+    if (heard && heard !== this.lastLoggedHeard) {
+      this.lastLoggedHeard = heard;
+      writeLog(`[ouviu] ${heard}`);
+    }
+    const snap = getSourceTape(this.code).pushCommitted(committed, tip);
+    this.handleSnapshot(snap);
+    this.armSilence();
+  }
+
   stop() {
     const tape = getSourceTape(this.code);
     const snap = tape.flushAll();
