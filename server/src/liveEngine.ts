@@ -9,7 +9,7 @@ import {
   looksLikeVerseReading,
 } from "./bibleRefs.js";
 import { writeLog } from "./boot.js";
-import { polishChurchTerms } from "./churchGlossary.js";
+import { correctAsrTerms, polishChurchTerms } from "./churchGlossary.js";
 import { translateNllb } from "./nllbTranslate.js";
 import { rivaCanPivot, translateRiva } from "./rivaTranslate.js";
 import { clearSermonCard, refreshSermonCard } from "./sermonMemory.js";
@@ -195,11 +195,14 @@ export class LiveEngine {
       return; // never show hallucinated text on the live line
     }
     if (snap.open.trim()) {
-      this.liveOriginal = snap.open;
+      // Church vocabulary fixed once, so the source shown and translated agree.
+      const lang = this.hooks.getSourceLang();
+      const open = correctAsrTerms(snap.open, lang);
+      this.liveOriginal = open;
       if (snap.openChanged || !this.liveId) {
         if (!this.liveId) this.liveId = makeId(`live-${this.code}`);
-        this.emitLiveShell(snap.open);
-        this.scheduleTranslate(snap.openStable || snap.open, false);
+        this.emitLiveShell(open);
+        this.scheduleTranslate(snap.openStable ? correctAsrTerms(snap.openStable, lang) : open, false);
       }
     } else if (snap.frozeOpen) {
       this.liveOriginal = "";
@@ -443,7 +446,7 @@ export class LiveEngine {
   }
 
   private async freezePhrase(phrase: string) {
-    const raw = stripRepeats(phrase.trim());
+    const raw = correctAsrTerms(stripRepeats(phrase.trim()), this.hooks.getSourceLang());
     if (isHallucination(raw, this.hooks.getSourceLang())) {
       writeLog(`[descartado] ${phrase.trim().slice(0, 120)}`);
       return;

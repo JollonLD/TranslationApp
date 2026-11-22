@@ -7,7 +7,9 @@
     "start": "tsx src/index.ts",
     "test:e2e": "tsx src/test/e2e-engine.ts",
     "wer": "tsx src/tools/wer.ts",
-    "test:wer": "tsx src/test/wer.ts"
+    "test:wer": "tsx src/test/wer.ts",
+    "test:unit": "tsx src/test/asr-filter.ts && tsx src/test/asr-terms.ts && tsx src/test/llm-queue.ts && tsx src/test/wer.ts && tsx ../web/src/lib/audioLevel.test.ts",
+    "test": "npm run test:unit && npm run test:e2e"
   },
   "dependencies": {
     "cors": "^2.8.5",

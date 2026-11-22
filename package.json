@@ -7,7 +7,8 @@
     "start": "npm run build -w web && npm run start -w server",
     "build": "npm run build -w web",
     "build:win": "node scripts/build-windows.mjs",
-    "test:e2e": "npm run test:e2e -w server"
+    "test:e2e": "npm run test:e2e -w server",
+    "test": "npm run test -w server"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
