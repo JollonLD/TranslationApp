@@ -66,6 +66,19 @@ function sameStem(a: string, b: string) {
   return n >= 3 && x.slice(0, n) === y.slice(0, n);
 }
 
+function fold(word: string) {
+  return bare(word).normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Same spoken word after the ASR settled spelling, accent or ending. */
+function alike(a: string, b: string) {
+  const x = fold(a);
+  const y = fold(b);
+  if (x === y) return true;
+  const n = Math.min(4, x.length, y.length);
+  return n >= 3 && x.slice(0, n) === y.slice(0, n);
+}
+
 /** Longest suffix of `prev` that matches a prefix of `next`. */
 function overlapSuffixPrefix(prev: string[], next: string[]) {
   const max = Math.min(prev.length, next.length, 40);
@@ -91,6 +104,8 @@ export class SourceTape {
   private tip: string[] = [];
   private lastInputAt = 0;
   private lastOpenKey = "";
+  /** Tip words a pause froze before the ASR committed them. */
+  private frozenTip: string[] = [];
 
   reset() {
     this.confirmed = [];
@@ -98,6 +113,7 @@ export class SourceTape {
     this.tip = [];
     this.lastInputAt = 0;
     this.lastOpenKey = "";
+    this.frozenTip = [];
   }
 
   msSinceLastInput(now = Date.now()) {
@@ -169,6 +185,66 @@ export class SourceTape {
     return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
   }
 
+  /**
+   * ASR that already separates committed words from the unstable tip (WhisperLiveKit).
+   * `committed` holds only new words, so nothing is matched or guessed: append, never repeat.
+   */
+  pushCommitted(committed: string, tip: string, now = Date.now()): TapePushResult {
+    this.lastInputAt = now;
+    let fresh = wordsOf(committed);
+    const nextTip = wordsOf(tip);
+    const frozen: string[] = [];
+
+    // A pause froze the tip before the ASR committed it: skip those words once.
+    if (this.frozenTip.length && fresh.length) {
+      const n = Math.min(this.frozenTip.length, fresh.length);
+      let k = 0;
+      // "graca" frozen, "graça" committed: same word, only the spelling settled.
+      while (k < n && alike(this.frozenTip[k], fresh[k])) {
+        k += 1;
+      }
+      // The whole delta was the frozen tip: the rest of the tip may still arrive.
+      this.frozenTip = k === fresh.length ? this.frozenTip.slice(k) : [];
+      fresh = fresh.slice(k);
+    }
+
+    this.openConfirmed.push(...fresh);
+    this.tip = nextTip;
+
+    // Close every finished sentence inside committed words; the tip may still change.
+    while (true) {
+      const cut = this.cutCommittedSentence();
+      if (!cut) break;
+      frozen.push(cut);
+      this.appendConfirmed(cut);
+    }
+
+    if (this.openWords().length >= MAX_OPEN_WORDS && this.openConfirmed.length) {
+      const block = this.openConfirmed.join(" ");
+      frozen.push(block);
+      this.appendConfirmed(block);
+      this.openConfirmed = [];
+    }
+
+    const open = this.getOpenText();
+    const openKey = open.toLowerCase();
+    const openChanged = openKey !== this.lastOpenKey;
+    this.lastOpenKey = openKey;
+    return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
+  }
+
+  private cutCommittedSentence(): string | null {
+    const words = this.openConfirmed;
+    for (let i = 0; i < words.length; i += 1) {
+      if (!END_SENTENCE.test(words[i])) continue;
+      if (i + 1 < 3) continue; // "Amém." joins the next sentence
+      const sentence = words.slice(0, i + 1).join(" ");
+      this.openConfirmed = words.slice(i + 1);
+      return sentence;
+    }
+    return null;
+  }
+
   /** Close the open phrase after silence (call from timer). */
   freezeSilence(now = Date.now()): TapePushResult {
     if (!this.hasOpen()) {
@@ -184,6 +260,7 @@ export class SourceTape {
       frozen.push(open.trim());
       this.appendConfirmed(open);
     }
+    this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
     this.lastOpenKey = "";
@@ -198,6 +275,7 @@ export class SourceTape {
       frozen.push(open.trim());
       this.appendConfirmed(open);
     }
+    this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
     this.lastOpenKey = "";

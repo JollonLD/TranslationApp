@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { Server } from "socket.io";
 import { io as ioClient, type Socket } from "socket.io-client";
 import { detectBibleRefs, looksLikeVerseReading } from "../bibleRefs.js";
-import { utteranceFromWlk } from "../wlkTranscript.js";
+import { WlkStream, utteranceFromWlk, type WlkFrame } from "../wlkTranscript.js";
 import { polishChurchTerms, prepareChurchSource } from "../churchGlossary.js";
 import {
   clearLiveEngine,
@@ -618,6 +618,204 @@ async function testPreviousLinesFollowLanguage() {
 
 // —— Socket.IO E2E (minimal server wiring like production) ——
 
+// —— WhisperLiveKit: cumulative frames must never paste a sentence twice ——
+
+const SERMON = [
+  "Hoje vamos falar sobre a graça de Deus",
+  "Ela nos alcança mesmo quando não merecemos",
+  "Paulo escreveu aos romanos sobre isso com muita clareza",
+  "Onde abundou o pecado superabundou a graça",
+  "Isso muda a forma como vivemos cada dia",
+  "Por isso devemos perdoar uns aos outros",
+  "A igreja é uma família que caminha junta",
+  "Vamos orar agora pedindo direção ao Senhor",
+  "Ele ouve cada oração feita com sinceridade",
+  "Amém",
+];
+
+function frameOf(lines: string[], buffer: string): WlkFrame {
+  return { lines: lines.map((text) => ({ text })), buffer_transcription: buffer };
+}
+
+/** Words as the listener reads them, punctuation removed. */
+function plainWords(text: string) {
+  return words(text).map((w) => w.toLowerCase().replace(/[.,;:!?…]+$/g, ""));
+}
+
+/**
+ * Feed a sermon the way WhisperLiveKit does: every frame repeats all committed lines
+ * of the session plus the buffer. Words commit a few at a time, the tip keeps growing.
+ */
+function runWlkSermon(sentences: string[], opts: { pauseMs: number; commitEvery: number }) {
+  const tape = new SourceTape();
+  const stream = new WlkStream();
+  const frozen: string[] = [];
+  const committed: string[] = [];
+  let t = 10_000;
+  const feed = (frame: WlkFrame) => {
+    const delta = stream.next(frame);
+    t += 250;
+    if (delta) frozen.push(...tape.pushCommitted(delta.committed, delta.tip, t).frozen);
+  };
+  for (const sentence of sentences) {
+    const w = words(sentence);
+    let stableCount = 0;
+    for (let i = 1; i <= w.length; i += 1) {
+      if (i - stableCount > opts.commitEvery) stableCount = i - 1;
+      const open = w.slice(0, stableCount).join(" ");
+      feed(frameOf([...committed, open].filter(Boolean), w.slice(stableCount, i).join(" ")));
+    }
+    committed.push(`${sentence}.`);
+    feed(frameOf(committed, ""));
+    t += opts.pauseMs;
+    frozen.push(...tape.freezeSilence(t).frozen);
+  }
+  frozen.push(...tape.flushAll().frozen);
+  return { frozen, tape };
+}
+
+function testWlkCumulativeFramesDoNotDuplicate() {
+  console.log("\n[WLK] full-session frames: each sentence frozen exactly once");
+  const { frozen } = runWlkSermon(SERMON, { pauseMs: 300, commitEvery: 3 });
+  const expected = SERMON.flatMap((s) => plainWords(s));
+  const got = frozen.flatMap((f) => plainWords(f));
+  assertEq(got.length, expected.length, "frozen word count equals spoken word count");
+  assertEq(got.join(" "), expected.join(" "), "frozen text is the sermon once, in order");
+  for (const sentence of SERMON.slice(0, -1)) {
+    const hits = frozen.filter((f) => f.includes(sentence)).length;
+    assertEq(hits, 1, `"${sentence.slice(0, 28)}…" appears once`);
+  }
+}
+
+function testWlkLongSermonPastTapeWindow() {
+  console.log("\n[WLK] 300+ words: history beyond the tape window is not replayed");
+  const long = Array.from({ length: 4 }, () => SERMON).flat();
+  const { frozen } = runWlkSermon(long, { pauseMs: 2_600, commitEvery: 2 });
+  const expected = long.flatMap((s) => plainWords(s));
+  const got = frozen.flatMap((f) => plainWords(f));
+  assertEq(got.length, expected.length, "no word lost or repeated after 300+ words");
+  assertEq(got.join(" "), expected.join(" "), "order preserved across the whole session");
+}
+
+function testWlkNoPunctuationKeepsEveryWord() {
+  console.log("\n[WLK] speech without punctuation: silence and length freeze, nothing repeats");
+  const tape = new SourceTape();
+  const stream = new WlkStream();
+  const spoken = Array.from({ length: 130 }, (_, i) => `palavra${i}`);
+  const frozen: string[] = [];
+  let t = 1_000;
+  for (let i = 1; i <= spoken.length; i += 1) {
+    const stable = spoken.slice(0, Math.max(0, i - 2)).join(" ");
+    const delta = stream.next(frameOf(stable ? [stable] : [], spoken.slice(Math.max(0, i - 2), i).join(" ")));
+    t += i % 40 === 0 ? 3_000 : 200;
+    if (i % 40 === 0) frozen.push(...tape.freezeSilence(t).frozen);
+    if (delta) frozen.push(...tape.pushCommitted(delta.committed, delta.tip, t).frozen);
+  }
+  const delta = stream.next(frameOf([spoken.join(" ")], ""));
+  if (delta) frozen.push(...tape.pushCommitted(delta.committed, delta.tip, t + 100).frozen);
+  frozen.push(...tape.flushAll().frozen);
+  const got = frozen.flatMap((f) => words(f));
+  assertEq(got.join(" "), spoken.join(" "), "every word exactly once, in order");
+}
+
+function testWlkSilenceFrozeTipBeforeCommit() {
+  console.log("\n[WLK] pause freezes the tip; the later commit does not repeat it");
+  const tape = new SourceTape();
+  const stream = new WlkStream();
+  const push = (frame: WlkFrame, t: number) => {
+    const d = stream.next(frame);
+    return d ? tape.pushCommitted(d.committed, d.tip, t).frozen : [];
+  };
+  const frozen: string[] = [];
+  frozen.push(...push(frameOf(["Jesus é o caminho"], "e a verdade"), 1_000));
+  frozen.push(...tape.freezeSilence(1_000 + FREEZE_SILENCE_MS + 50).frozen);
+  assertEq(frozen.join(" | "), "Jesus é o caminho e a verdade", "pause froze committed words and tip");
+  frozen.push(...push(frameOf(["Jesus é o caminho e a verdade."], ""), 4_000));
+  frozen.push(...push(frameOf(["Jesus é o caminho e a verdade.", "E a vida"], ""), 4_300));
+  frozen.push(...tape.flushAll().frozen);
+  assertEq(frozen.join(" | "), "Jesus é o caminho e a verdade | E a vida", "tip words are not frozen twice");
+}
+
+function testWlkTipRevisionSettles() {
+  console.log("\n[WLK] tip rewritten by the ASR replaces, never appends");
+  const tape = new SourceTape();
+  const stream = new WlkStream();
+  const push = (frame: WlkFrame, t: number) => {
+    const d = stream.next(frame);
+    if (d) tape.pushCommitted(d.committed, d.tip, t);
+  };
+  push(frameOf([], "a graca"), 1_000);
+  push(frameOf([], "a graça de"), 1_200);
+  push(frameOf(["a graça de Deus"], "nos"), 1_400);
+  push(frameOf(["a graça de Deus nos alcança"], ""), 1_600);
+  assertEq(tape.getOpenText(), "a graça de Deus nos alcança", "open line has the settled words once");
+}
+
+function testWlkServerHistoryRestart() {
+  console.log("\n[WLK] server restarts its history: new speech continues, old is not replayed");
+  const stream = new WlkStream();
+  const first = stream.next(frameOf(["Primeira frase do culto.", "Segunda frase aqui."], ""));
+  assertEq(first?.committed, "Primeira frase do culto. Segunda frase aqui.", "first frame commits both lines");
+  const again = stream.next(frameOf(["Primeira frase do culto.", "Segunda frase aqui."], ""));
+  assertEq(again, null, "identical frame yields nothing");
+  const fixed = stream.next(frameOf(["Primeira frase do culto,", "segunda frase aqui.", "Terceira"], ""));
+  assertEq(fixed?.committed, "Terceira", "punctuation fix in old text adds only the new word");
+  const restarted = stream.next(frameOf(["Nova sessão começa"], ""));
+  assertEq(restarted?.committed, "Nova sessão começa", "restarted history becomes new speech");
+}
+
+async function testLiveEngineWlkFinalsUnique() {
+  console.log("\n[LiveEngine] WhisperLiveKit sermon: finals and live lines never repeat text");
+  process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
+  const mock = installFetchMock();
+  clearLiveEngine("E2E-WLK");
+  clearSourceTape("E2E-WLK");
+  const finals: Caption[] = [];
+  const lives: Caption[] = [];
+  const engine = ensureLiveEngine("E2E-WLK", {
+    getSourceLang: () => "pt",
+    getTargets: () => ["en"],
+    onLive: (c) => lives.push({ ...c, translations: { ...c.translations } }),
+    onUpdate: () => undefined,
+    onFinal: (c) => finals.push({ ...c, translations: { ...c.translations } }),
+  });
+  const stream = new WlkStream();
+  const committed: string[] = [];
+  for (const sentence of SERMON.slice(0, 8)) {
+    const w = words(sentence);
+    for (let i = 1; i <= w.length; i += 1) {
+      const d = stream.next(frameOf(
+        [...committed, w.slice(0, Math.max(0, i - 2)).join(" ")].filter(Boolean),
+        w.slice(Math.max(0, i - 2), i).join(" "),
+      ));
+      if (d) engine.pushCommitted(d.committed, d.tip);
+    }
+    committed.push(`${sentence}.`);
+    const d = stream.next(frameOf(committed, ""));
+    if (d) engine.pushCommitted(d.committed, d.tip);
+    await sleep(30);
+  }
+  await sleep(1_500);
+  const originals = finals.map((f) => f.original);
+  assertEq(finals.length, 8, "one final per spoken sentence");
+  assertEq(new Set(originals).size, originals.length, "no final repeats another");
+  for (let i = 0; i < 8; i += 1) {
+    assertEq(plainWords(originals[i] ?? "").join(" "), plainWords(SERMON[i]).join(" "), `final ${i + 1} is exactly its sentence`);
+  }
+  const english = finals.map((f) => f.translations.en ?? "");
+  // Mock Riva echoes the source as "EN:<text>"; the church glossary may swap terms.
+  const ownSentenceOnly = english.every((en, i) => {
+    const src = plainWords(SERMON[i]);
+    const n = words(en).length;
+    return en.startsWith("EN:") && n >= src.length - 1 && n <= src.length + 2;
+  });
+  assert(ownSentenceOnly, "each English final translates only its own sentence");
+  const bloated = lives.filter((c) => words(c.original).length > 20);
+  assertEq(bloated.length, 0, "live line never carries earlier sentences");
+  engine.clear();
+  mock.restore();
+}
+
 async function testSocketCaptionFlow() {
   console.log("\n[Socket E2E] host transcript → listener caption:live / caption");
   process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
@@ -727,6 +925,12 @@ async function main() {
   testBibleDetection();
   testGlossaryAfterNotBefore();
   testWlkFrames();
+  testWlkCumulativeFramesDoNotDuplicate();
+  testWlkLongSermonPastTapeWindow();
+  testWlkNoPunctuationKeepsEveryWord();
+  testWlkSilenceFrozeTipBeforeCommit();
+  testWlkTipRevisionSettles();
+  testWlkServerHistoryRestart();
   testRivaLanguageMatrix();
   testCaptionUpsert();
 
@@ -735,6 +939,7 @@ async function main() {
   await testLiveEngineCancelsStaleFlight();
   await testLiveEngineMultiLangPivot();
   await testPreviousLinesFollowLanguage();
+  await testLiveEngineWlkFinalsUnique();
   await testSocketCaptionFlow();
 
   console.log("\n═══ Results ═══");

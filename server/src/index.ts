@@ -392,10 +392,10 @@ io.on("connection", (socket) => {
       clearTranslateSession(space.code);
       engineFor(space.code);
       if (payload.asr === "whisperlivekit") {
-        const opened = openAsrSession(space.code, space.sourceLang, (text, isFinal) => {
+        const opened = openAsrSession(space.code, space.sourceLang, (committed, tip) => {
           const live = getSpace(space.code);
           if (!live || live.hostId !== socket.id) return;
-          engineFor(space.code).push(text, isFinal);
+          engineFor(space.code).pushCommitted(committed, tip);
         });
         if (!opened) {
           socket.emit("asr:fallback", { reason: "WhisperLiveKit is not ready." });
