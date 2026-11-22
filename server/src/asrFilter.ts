@@ -41,10 +41,18 @@ const EN_PATTERNS: RegExp[] = [
   /^bye( bye)+$/,
 ];
 
-const PATTERNS: Record<string, RegExp[]> = { pt: PT_PATTERNS, en: EN_PATTERNS };
+const IT_PATTERNS: RegExp[] = [
+  /^sottotitoli creati dalla comunita amara org$/,
+  /^sottotitoli (e revisione )?a cura di .+$/,
+  /^grazie (a tutti )?per la visione$/,
+  /^iscriviti al canale$/,
+  /^(ciao )+ciao$/,
+];
+
+const PATTERNS: Record<string, RegExp[]> = { pt: PT_PATTERNS, en: EN_PATTERNS, it: IT_PATTERNS };
 
 /** Words a congregation really repeats; a run of them is worship, not a glitch. */
-const LITURGICAL = new Set(["aleluia", "amem", "santo", "santa", "gloria", "hosana", "digno", "jesus", "senhor", "aleluya", "amen", "holy"]);
+const LITURGICAL = new Set(["aleluia", "amem", "santo", "santa", "gloria", "hosana", "digno", "jesus", "senhor", "aleluya", "amen", "holy", "alleluia", "alleluja", "osanna"]);
 
 /** Whisper loops run long; people repeat a word a few times. */
 const LOOP_WORD_RUN = 8;

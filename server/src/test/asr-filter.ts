@@ -27,6 +27,23 @@ for (const s of bad) check(`hallucination: ${s}`, isHallucination(s, "pt"));
 check("en pattern in an English sermon", isHallucination("Thanks for watching!", "en"));
 check("en subtitles credit", isHallucination("Subtitles by the Amara.org community", "en"));
 
+const badIt = [
+  "Sottotitoli creati dalla comunità Amara.org",
+  "Sottotitoli a cura di QTSS",
+  "Grazie per la visione!",
+  "Grazie a tutti per la visione.",
+  "Iscriviti al canale",
+  "Ciao ciao",
+  "Ciao, ciao, ciao",
+];
+for (const s of badIt) check(`it hallucination: ${s}`, isHallucination(s, "it"));
+const goodIt = ["Grazie, Signore", "Ciao", "Grazie per la visione che ci hai dato, Signore", "Alleluia, alleluia, alleluia", "Osanna osanna osanna osanna"];
+for (const s of goodIt) check(`it legit: ${s}`, !isHallucination(s, "it"));
+check("it pattern not applied to pt", !isHallucination("Iscriviti al canale", "pt"));
+check("alleluia x16 is worship", !isHallucination(Array(16).fill("alleluia").join(" "), "it"));
+check("osanna x16 is worship", !isHallucination(Array(16).fill("osanna").join(" "), "it"));
+check("it word loop still caught", isHallucination(Array(16).fill("allora").join(" "), "it"));
+
 const good = [
   "Obrigado, Senhor",
   "Obrigado por assistir a esta pregação hoje na igreja, irmãos",
