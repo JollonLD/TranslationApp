@@ -675,3 +675,19 @@ h2,
     align-content: center;
   }
 }
+
+/* Live line still waiting for its first stable translation. */
+.listening-dots {
+  opacity: 0.55;
+  letter-spacing: 0.15em;
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.75; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .listening-dots { animation: none; }
+}

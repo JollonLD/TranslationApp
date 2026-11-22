@@ -56,6 +56,14 @@ export function captionText(caption: Caption, lang: LanguageCode) {
   return caption.translations?.[lang] || caption.original;
 }
 
+/**
+ * Live line text in the listener's language only. Never flashes the speaker's
+ * language while the translation is on its way: empty means "still listening".
+ */
+export function liveCaptionText(caption: Caption, lang: LanguageCode) {
+  return caption.translations?.[lang]?.trim() ?? "";
+}
+
 export function preferredReadLang(): LanguageCode {
   if (typeof window === "undefined") return "en";
   const saved = window.localStorage.getItem("palavra-read-lang");

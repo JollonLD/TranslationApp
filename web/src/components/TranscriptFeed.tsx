@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { captionText, type Caption, type LanguageCode } from "../types";
+import { captionText, liveCaptionText, type Caption, type LanguageCode } from "../types";
 
 type TranscriptFeedProps = {
   captions: Caption[];
@@ -87,7 +87,9 @@ export function TranscriptFeed({
             {visiblePartial.bibleRef ? (
               <span className="bible-chip">{visiblePartial.bibleRef}</span>
             ) : null}
-            {language ? captionText(visiblePartial, language) : visiblePartial.translated}
+            {language
+              ? liveCaptionText(visiblePartial, language) || <span className="listening-dots" aria-label="…">…</span>
+              : visiblePartial.translated}
             {showOriginal ? (
               <span className="transcript-original">{visiblePartial.original}</span>
             ) : null}
