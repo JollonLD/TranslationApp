@@ -56712,6 +56712,16 @@ function sameStem(a, b) {
   const n = Math.min(4, x.length, y.length);
   return n >= 3 && x.slice(0, n) === y.slice(0, n);
 }
+function fold(word) {
+  return bare(word).normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+function alike(a, b) {
+  const x = fold(a);
+  const y = fold(b);
+  if (x === y) return true;
+  const n = Math.min(4, x.length, y.length);
+  return n >= 3 && x.slice(0, n) === y.slice(0, n);
+}
 function overlapSuffixPrefix(prev, next) {
   const max = Math.min(prev.length, next.length, 40);
   for (let k = max; k >= 1; k -= 1) {
@@ -56735,12 +56745,15 @@ var SourceTape = class {
   tip = [];
   lastInputAt = 0;
   lastOpenKey = "";
+  /** Tip words a pause froze before the ASR committed them. */
+  frozenTip = [];
   reset() {
     this.confirmed = [];
     this.openConfirmed = [];
     this.tip = [];
     this.lastInputAt = 0;
     this.lastOpenKey = "";
+    this.frozenTip = [];
   }
   msSinceLastInput(now = Date.now()) {
     if (!this.lastInputAt) return Number.POSITIVE_INFINITY;
@@ -56797,6 +56810,55 @@ var SourceTape = class {
     this.lastOpenKey = openKey;
     return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
   }
+  /**
+   * ASR that already separates committed words from the unstable tip (WhisperLiveKit).
+   * `committed` holds only new words, so nothing is matched or guessed: append, never repeat.
+   */
+  pushCommitted(committed, tip, now = Date.now()) {
+    this.lastInputAt = now;
+    let fresh = wordsOf(committed);
+    const nextTip = wordsOf(tip);
+    const frozen = [];
+    if (this.frozenTip.length && fresh.length) {
+      const n = Math.min(this.frozenTip.length, fresh.length);
+      let k = 0;
+      while (k < n && alike(this.frozenTip[k], fresh[k])) {
+        k += 1;
+      }
+      this.frozenTip = k === fresh.length ? this.frozenTip.slice(k) : [];
+      fresh = fresh.slice(k);
+    }
+    this.openConfirmed.push(...fresh);
+    this.tip = nextTip;
+    while (true) {
+      const cut = this.cutCommittedSentence();
+      if (!cut) break;
+      frozen.push(cut);
+      this.appendConfirmed(cut);
+    }
+    if (this.openWords().length >= MAX_OPEN_WORDS && this.openConfirmed.length) {
+      const block = this.openConfirmed.join(" ");
+      frozen.push(block);
+      this.appendConfirmed(block);
+      this.openConfirmed = [];
+    }
+    const open = this.getOpenText();
+    const openKey = open.toLowerCase();
+    const openChanged = openKey !== this.lastOpenKey;
+    this.lastOpenKey = openKey;
+    return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
+  }
+  cutCommittedSentence() {
+    const words = this.openConfirmed;
+    for (let i = 0; i < words.length; i += 1) {
+      if (!END_SENTENCE.test(words[i])) continue;
+      if (i + 1 < 3) continue;
+      const sentence = words.slice(0, i + 1).join(" ");
+      this.openConfirmed = words.slice(i + 1);
+      return sentence;
+    }
+    return null;
+  }
   /** Close the open phrase after silence (call from timer). */
   freezeSilence(now = Date.now()) {
     if (!this.hasOpen()) {
@@ -56811,6 +56873,7 @@ var SourceTape = class {
       frozen.push(open.trim());
       this.appendConfirmed(open);
     }
+    this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
     this.lastOpenKey = "";
@@ -56824,6 +56887,7 @@ var SourceTape = class {
       frozen.push(open.trim());
       this.appendConfirmed(open);
     }
+    this.frozenTip = [...this.tip];
     this.openConfirmed = [];
     this.tip = [];
     this.lastOpenKey = "";
@@ -57627,6 +57691,18 @@ var LiveEngine = class {
     this.handleSnapshot(snap);
     this.armSilence();
   }
+  /** WhisperLiveKit: only new committed words plus the current tip. */
+  pushCommitted(committed, tip) {
+    if (this.closed) return;
+    const heard = [committed.trim(), tip.trim()].filter(Boolean).join(" | ");
+    if (heard && heard !== this.lastLoggedHeard) {
+      this.lastLoggedHeard = heard;
+      writeLog(`[ouviu] ${heard}`);
+    }
+    const snap = getSourceTape(this.code).pushCommitted(committed, tip);
+    this.handleSnapshot(snap);
+    this.armSilence();
+  }
   stop() {
     const tape = getSourceTape(this.code);
     const snap = tape.flushAll();
@@ -58258,18 +58334,60 @@ async function boot() {
 function clean(value) {
   return (value ?? "").replace(/\s+/g, " ").trim();
 }
-function utteranceFromWlk(frame, previousStable = "") {
-  const stable = (frame.lines ?? []).map((line) => clean(line.text)).filter(Boolean).join(" ");
-  const tip = clean(frame.buffer_transcription);
-  const full = [stable, tip].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-  const grew = stable.length > previousStable.length && stable.startsWith(previousStable.trim());
-  return {
-    stable,
-    tip,
-    full,
-    isFinal: Boolean(stable) && !tip && grew
-  };
+function wordsOf2(text) {
+  return clean(text).split(" ").filter(Boolean);
 }
+function bare2(word) {
+  return word.toLowerCase().replace(/[.,;:!?…"“”'«»()]+/g, "");
+}
+function sharedPrefixLen2(a, b) {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && bare2(a[i]) === bare2(b[i])) i += 1;
+  return i;
+}
+function overlapSuffixPrefix2(prev, next, max = 60) {
+  const limit = Math.min(prev.length, next.length, max);
+  for (let k = limit; k >= 1; k -= 1) {
+    let ok = true;
+    for (let i = 0; i < k; i += 1) {
+      if (bare2(prev[prev.length - k + i]) !== bare2(next[i])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return k;
+  }
+  return 0;
+}
+var WlkStream = class {
+  delivered = [];
+  lastTip = "";
+  reset() {
+    this.delivered = [];
+    this.lastTip = "";
+  }
+  next(frame) {
+    const stable = wordsOf2(
+      (frame.lines ?? []).map((line) => clean(line.text)).filter(Boolean).join(" ")
+    );
+    const tip = clean(frame.buffer_transcription);
+    const prev = this.delivered;
+    let fresh;
+    const shared = sharedPrefixLen2(prev, stable);
+    if (shared === prev.length) {
+      fresh = stable.slice(shared);
+    } else if (stable.length >= prev.length && prev.length - shared <= 6) {
+      fresh = stable.slice(prev.length);
+    } else {
+      fresh = stable.slice(overlapSuffixPrefix2(prev, stable));
+    }
+    if (stable.length) this.delivered = stable;
+    if (!fresh.length && tip === this.lastTip) return null;
+    this.lastTip = tip;
+    return { committed: fresh.join(" "), tip };
+  }
+};
 
 // server/src/asrSession.ts
 var links = /* @__PURE__ */ new Map();
@@ -58282,7 +58400,7 @@ function openAsrSession(code, language, onText) {
   const WS = socketCtor();
   if (!status.ready || status.mode !== "whisperlivekit" || !WS) return false;
   const ws = new WS(whisperWsUrl(language));
-  const link = { ws, lastFull: "", lastStable: "", onText };
+  const link = { ws, stream: new WlkStream(), onText };
   links.set(code, link);
   ws.addEventListener("message", (event) => {
     const current = links.get(code);
@@ -58295,14 +58413,8 @@ function openAsrSession(code, language, onText) {
     } catch {
       return;
     }
-    const utterance = utteranceFromWlk(frame, current.lastStable);
-    if (!utterance.full || utterance.full === current.lastFull) {
-      current.lastStable = utterance.stable;
-      return;
-    }
-    current.lastFull = utterance.full;
-    current.lastStable = utterance.stable;
-    current.onText(utterance.full, utterance.isFinal);
+    const delta = current.stream.next(frame);
+    if (delta) current.onText(delta.committed, delta.tip);
   });
   ws.addEventListener("error", () => {
     writeLog(`[asr] websocket error for ${code}`);
@@ -58777,10 +58889,10 @@ io2.on("connection", (socket) => {
       clearTranslateSession(space.code);
       engineFor(space.code);
       if (payload.asr === "whisperlivekit") {
-        const opened = openAsrSession(space.code, space.sourceLang, (text, isFinal) => {
+        const opened = openAsrSession(space.code, space.sourceLang, (committed, tip) => {
           const live = getSpace(space.code);
           if (!live || live.hostId !== socket.id) return;
-          engineFor(space.code).push(text, isFinal);
+          engineFor(space.code).pushCommitted(committed, tip);
         });
         if (!opened) {
           socket.emit("asr:fallback", { reason: "WhisperLiveKit is not ready." });
