@@ -691,3 +691,18 @@ h2,
 @media (prefers-reduced-motion: reduce) {
   .listening-dots { animation: none; }
 }
+
+/* Mixer level meter (cabin). */
+.level-meter { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.level-bar { position: relative; flex: 0 0 180px; height: 10px; border-radius: 5px; background: var(--ink-soft); border: 1px solid var(--line); overflow: hidden; }
+.level-target { position: absolute; top: 0; bottom: 0; background: rgba(244, 234, 212, 0.14); }
+.level-rms { position: absolute; left: 0; top: 0; bottom: 0; background: var(--gold); transition: width 90ms linear; }
+.level-peak { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--paper); transition: left 90ms linear; }
+.level-text { font-size: 0.85rem; color: var(--muted); }
+.level-low .level-rms { background: var(--gold-deep); }
+.level-low .level-text { color: var(--gold); }
+.level-clip .level-rms { background: var(--danger); }
+.level-clip .level-text { color: var(--danger); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  .level-rms, .level-peak { transition: none; }
+}

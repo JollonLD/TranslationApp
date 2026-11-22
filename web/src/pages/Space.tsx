@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Flame } from "../components/Flame";
 import { TranscriptFeed } from "../components/TranscriptFeed";
-import { useMixerPcm } from "../hooks/useMixerPcm";
+import { useMixerPcm, type MixerLevel } from "../hooks/useMixerPcm";
+import { meterFraction, TARGET_PEAK_MAX_DB, TARGET_PEAK_MIN_DB } from "../lib/audioLevel";
 import { useSpeech } from "../hooks/useSpeech";
 import { appendCaption, mergeSpaceCaptions, updateCaption } from "../lib/captions";
 import { viewerUrl } from "../lib/lanUrl";
@@ -15,6 +16,38 @@ import {
   type LanguageCode,
   type SpaceState,
 } from "../types";
+
+const LEVEL_TEXT = {
+  ok: "Level OK",
+  low: "Low signal - raise the mixer output",
+  clip: "Clipping - lower the mixer output",
+} as const;
+
+function LevelMeter({ level }: { level: MixerLevel }) {
+  const pct = (db: number) => `${(meterFraction(db) * 100).toFixed(1)}%`;
+  const from = meterFraction(TARGET_PEAK_MIN_DB) * 100;
+  const to = meterFraction(TARGET_PEAK_MAX_DB) * 100;
+  return (
+    <div className={`level-meter level-${level.status}`}>
+      <div
+        className="level-bar"
+        role="meter"
+        aria-label="Mixer input level"
+        aria-valuemin={-60}
+        aria-valuemax={0}
+        aria-valuenow={Math.round(Math.max(-60, level.peakDb))}
+        aria-valuetext={`${Math.round(level.peakDb)} dBFS peak`}
+      >
+        <span className="level-target" style={{ left: `${from}%`, width: `${to - from}%` }} />
+        <span className="level-rms" style={{ width: pct(level.rmsDb) }} />
+        <span className="level-peak" style={{ left: pct(level.peakDb) }} />
+      </div>
+      <span className="level-text" role="status" aria-live="polite">
+        {LEVEL_TEXT[level.status]}
+      </span>
+    </div>
+  );
+}
 
 export function Space() {
   const [params] = useSearchParams();
@@ -266,6 +299,8 @@ export function Space() {
                   ? " · translation slow"
                   : ""}
             </div>
+
+            {listening && useWhisper ? <LevelMeter level={pcm.level} /> : null}
 
             <TranscriptFeed
               captions={captions}
