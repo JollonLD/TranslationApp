@@ -910,7 +910,22 @@ export function translateBibleBooks(text: string, target: LanguageCode) {
 // —— Post-ASR correction (source side, before the tape is translated) ——
 
 /** Bible books Whisper often writes without accents or with a split word. */
-const ASR_BOOKS: Array<[RegExp, string]> = [
+type Fix = [RegExp, string | ((match: string) => string)];
+
+/** Never lowercase what the speaker started with a capital. */
+function caseLike(source: string, to: string) {
+  return /^\p{Lu}/u.test(source) ? to.charAt(0).toLocaleUpperCase() + to.slice(1) : to;
+}
+
+function applyFixes(text: string, fixes: Fix[]) {
+  let out = text;
+  for (const [match, to] of fixes) {
+    out = out.replace(match, (m: string) => (typeof to === "string" ? caseLike(m, to) : to(m)));
+  }
+  return out;
+}
+
+const ASR_BOOKS: Fix[] = [
   [/\bg[eê]nesis\b/gi, "Gênesis"],
   [/\b[eê]xodo\b/gi, "Êxodo"],
   [/\blev[ií]tico\b/gi, "Levítico"],
@@ -946,15 +961,16 @@ const ASR_BOOKS: Array<[RegExp, string]> = [
   [/\bhebreus\b(?=\s+\d)/gi, "Hebreus"],
   [/\btiago\b(?=\s+\d)/gi, "Tiago"],
   [/\bapocalipse\b/gi, "Apocalipse"],
-  [/\bsalmos?\b(?=\s+\d)/gi, "Salmo"],
+  [/\bsalmos?\b(?=\s+\d)/gi, (m) => `S${m.slice(1).toLowerCase()}`],
 ];
 
 /** Split or garbled church words that keep coming back in ASR logs. */
-const ASR_PHRASES: Array<[RegExp, string]> = [
+const ASR_PHRASES: Fix[] = [
   [/\ba\s+leluia\b/gi, "aleluia"],
   [/\bal[ée]luia\b/gi, "aleluia"],
-  [/\ba\s+m[ée]m\b/gi, "amém"],
-  [/\bamem\b/gi, "amém"],
+  [/\ba\s+mém\b/gi, "amém"],
+  // "amem" is also the verb ("amem uns aos outros"): only fix it when said alone.
+  [/^\s*amem(?=[\s.!…]*$)/i, "amém"],
   [/\bo\s+sana\b/gi, "hosana"],
   [/\bosana\b/gi, "hosana"],
   [/\besp[ií]rito\s+santo\b/gi, "Espírito Santo"],
@@ -997,11 +1013,13 @@ export function parsePtNumber(words: string): number | null {
 
 /** Spoken numbers become digits only after a scripture cue, so "um amor" stays a word. */
 const BOOK_CUES = [
-  ...new Set(ASR_BOOKS.map(([, to]) => to)),
+  ...new Set(ASR_BOOKS.map(([, to]) => to).filter((to): to is string => typeof to === "string")),
   "Lucas", "Marcos", "Rute", "Ester", "Jó", "Daniel", "Jonas", "Naum", "Joel", "Amós",
   "Samuel", "Reis", "Pedro", "Judas", "Ezequiel", "Jeremias", "Números", "Cantares", "Esdras", "Tito",
 ].join("|");
-const CUE = String.raw`(?:cap[ií]tulo|vers[ií]culos?|verso|[Ss]almos?|(?:${BOOK_CUES})(?:\s+\d{1,3})?)`;
+// A book name alone is not enough ("Judas trinta moedas"): it needs a chapter in
+// digits after it, or a numbered book ("2 Pedro"). Chapter/verse words always count.
+const CUE = String.raw`(?:[Cc]ap[ií]tulo|[Vv]ers[ií]culos?|[Vv]erso|[Ss]almos?|(?:${BOOK_CUES})\s+\d{1,3}|[123]\s*(?:${BOOK_CUES}))`;
 const CUE_NUMBER = new RegExp(String.raw`\b(${CUE})\s+(${NUMBER_PHRASE.source})\b`, "g");
 
 /**
@@ -1010,15 +1028,14 @@ const CUE_NUMBER = new RegExp(String.raw`\b(${CUE})\s+(${NUMBER_PHRASE.source})\
  */
 export function correctAsrTerms(text: string, source: LanguageCode) {
   if (source !== "pt" || !text.trim()) return text;
-  let out = text;
-  for (const [match, to] of ASR_PHRASES) out = out.replace(match, to as string);
-  for (const [match, to] of ASR_BOOKS) out = out.replace(match, to);
+  let out = applyFixes(text, ASR_PHRASES);
+  out = applyFixes(out, ASR_BOOKS);
   // "capítulo três versículo dezesseis" → "capítulo 3 versículo 16"
   for (let i = 0; i < 3; i += 1) {
     const next = out.replace(CUE_NUMBER, (whole, cue: string, spoken: string) => {
       const n = parsePtNumber(spoken);
       if (n === null) return whole;
-      return `${/^salmos?$/i.test(cue) ? "Salmo" : cue} ${n}`;
+      return `${/^salmos?$/i.test(cue) ? `S${cue.slice(1)}` : cue} ${n}`;
     });
     if (next === out) break;
     out = next;
