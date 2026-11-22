@@ -1143,6 +1143,82 @@ function testWebSpeechKeepsRealRepetition() {
   assertEq(text.split("rallegratevi").length - 1, 3, "'rallegratevi' three times, as said");
 }
 
+function testWebSpeechReviewRegressions() {
+  console.log("\n[Web Speech] review regressions: speech is never dropped");
+  const said = (frozen: string[]) => plainWords(frozen.join(" ")).join(" ");
+  {
+    const { frozen } = runWebSpeech([
+      { text: "il signore sia con voi.", final: true },
+      { text: "e con il tuo spirito.", final: true, pauseMs: 3_000 },
+      { text: "preghiamo insieme fratelli miei.", final: true, pauseMs: 3_000 },
+      { text: "il signore sia con voi.", final: true, pauseMs: 24_000 },
+    ]);
+    assertEq(said(frozen).split("il signore sia con voi").length - 1, 2, "a sentence said again later is kept");
+  }
+  {
+    const { frozen } = runWebSpeech([
+      { text: "dobbiamo pregare per la pace.", final: true },
+      { text: "per la pace nel mondo.", final: true, pauseMs: 3_000 },
+    ]);
+    assertEq(said(frozen), "dobbiamo pregare per la pace per la pace nel mondo", "repeated phrase after a pause is kept");
+  }
+  {
+    const t = new SourceTape();
+    const f: string[] = [];
+    f.push(...t.push("il signore è con voi", false, 0).frozen);
+    f.push(...t.freezeSilence(3_000).frozen);
+    f.push(...t.push("il signore vi benedica", false, 3_500).frozen);
+    f.push(...t.push("il signore vi benedica sempre", true, 4_000).frozen);
+    f.push(...t.flushAll().frozen);
+    assertEq(said(f), "il signore è con voi il signore vi benedica sempre", "same start after a pause is a new sentence, nothing lost");
+  }
+  {
+    const t = new SourceTape();
+    const f: string[] = [];
+    f.push(...t.push("dio", false, 0).frozen);
+    f.push(...t.freezeSilence(3_000).frozen);
+    f.push(...t.push("di nuovo qui", false, 3_500).frozen);
+    f.push(...t.flushAll().frozen);
+    assertEq(said(f), "dio di nuovo qui", "'di' is not swallowed by 'dio'");
+  }
+  {
+    const { frozen } = runWebSpeech([
+      { text: "sono andato al mercato" },
+      { text: "io sono andato al mercato oggi" },
+      { text: "Io sono andato al mercato oggi.", final: true },
+    ]);
+    assertEq(said(frozen), "io sono andato al mercato oggi", "first word added by a revision: replaced, not appended");
+  }
+  {
+    const { frozen } = runWebSpeech([
+      { text: "e quindi andiamo avanti" },
+      { text: "quindi andiamo avanti insieme", final: true },
+    ]);
+    assertEq(said(frozen), "quindi andiamo avanti insieme", "first word dropped by a revision: replaced");
+  }
+  {
+    const { frozen } = runWebSpeech([
+      { text: "il pane quotidiano dacci oggi" },
+      { text: "Al pane quotidiano dacci oggi e sempre.", final: true },
+    ]);
+    assertEq(said(frozen), "al pane quotidiano dacci oggi e sempre", "first word swapped by a revision: replaced");
+  }
+  {
+    const t = new SourceTape();
+    const f: string[] = [];
+    f.push(...t.pushCommitted("il signore è buono con", "tutti", 0).frozen);
+    f.push(...t.push("con tutti noi sempre", false, 500).frozen);
+    f.push(...t.flushAll().frozen);
+    assertEq(said(f), "il signore è buono con tutti noi sempre", "ASR fallback mid-sentence: no repeated words");
+  }
+  {
+    const t = new SourceTape();
+    t.push("dico di no.", true, 0);
+    t.push("no no non voglio.", true, 3_000);
+    assert(plainWords(t.getConfirmedText()).join(" ").endsWith("dico di no no no non voglio"), "confirmed history keeps 'no no'");
+  }
+}
+
 async function testSocketCaptionFlow() {
   console.log("\n[Socket E2E] host transcript → listener caption:live / caption");
   process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
@@ -1262,6 +1338,7 @@ async function main() {
   testWebSpeechLongUtterancePauses();
   testWebSpeechGluedCom();
   testWebSpeechKeepsRealRepetition();
+  testWebSpeechReviewRegressions();
   testStableTextMonotonic();
   testStableTextHoldsOnDisagreement();
   testStableTextTailFix();
