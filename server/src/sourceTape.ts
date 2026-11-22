@@ -10,6 +10,10 @@ export const FREEZE_LONG_LINE_MS = 1_200;
 const LONG_LINE_WORDS = 32;
 /** Continuous speech with no pause still becomes one paragraph, not an endless line. */
 const MAX_OPEN_WORDS = 46;
+/** A long committed sentence closes at its last clause break (comma, semicolon, colon). */
+const CLAUSE_SPLIT_WORDS = 28;
+const MIN_CLAUSE_WORDS = 10;
+const CLAUSE_END = /[,;:]$/;
 
 export function silenceNeeded(openText: string) {
   const words = openText.trim().split(/\s+/).filter(Boolean).length;
@@ -219,6 +223,12 @@ export class SourceTape {
       this.appendConfirmed(cut);
     }
 
+    const clause = this.cutLongClause();
+    if (clause) {
+      frozen.push(clause);
+      this.appendConfirmed(clause);
+    }
+
     if (this.openWords().length >= MAX_OPEN_WORDS && this.openConfirmed.length) {
       const block = this.openConfirmed.join(" ");
       frozen.push(block);
@@ -231,6 +241,18 @@ export class SourceTape {
     const openChanged = openKey !== this.lastOpenKey;
     this.lastOpenKey = openKey;
     return this.snapshot(frozen, openChanged, frozen.length > 0 && !this.hasOpen());
+  }
+
+  /** Readable blocks: a long sentence closes at a clause break, never mid-clause. */
+  private cutLongClause(): string | null {
+    const words = this.openConfirmed;
+    if (words.length < CLAUSE_SPLIT_WORDS) return null;
+    for (let i = words.length - 2; i >= MIN_CLAUSE_WORDS - 1; i -= 1) {
+      if (!CLAUSE_END.test(words[i])) continue;
+      this.openConfirmed = words.slice(i + 1);
+      return words.slice(0, i + 1).join(" ");
+    }
+    return null;
   }
 
   private cutCommittedSentence(): string | null {

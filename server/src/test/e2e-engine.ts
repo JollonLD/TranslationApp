@@ -12,8 +12,10 @@ import {
   clearLiveEngine,
   ensureLiveEngine,
   fillMissingLanguages,
+  sameWords,
   type LiveEngineHooks,
 } from "../liveEngine.js";
+import { StableText } from "../stableCaption.js";
 import { rivaCanPivot, rivaSupportsDirect } from "../rivaTranslate.js";
 import {
   createSpace,
@@ -531,7 +533,8 @@ async function testLiveEngineCancelsStaleFlight() {
   engine.push("Deus ama", false);
   await sleep(40);
   engine.push("Deus ama o mundo", false);
-  await sleep(800);
+  // one translation + settle pause before the open line is shown whole
+  await sleep(1_300);
 
   const english = lives.map((c) => c.translations.en ?? "").join(" | ");
   assert(
@@ -605,11 +608,11 @@ async function testPreviousLinesFollowLanguage() {
     onFinal: () => undefined,
   });
   engine.push("A graça de Deus é suficiente", false);
-  await sleep(700);
+  await sleep(1_200);
   assert(lives.some((c) => c.translations.en), "open line started in English");
   targets = ["es"];
   engine.retarget();
-  await sleep(900);
+  await sleep(1_400);
   assert(lives.some((c) => c.translations.es), "open line follows the new language");
 
   engine.clear();
@@ -816,6 +819,225 @@ async function testLiveEngineWlkFinalsUnique() {
   mock.restore();
 }
 
+// —— Reading fluency ——
+
+/** Normalized erasure (Arivazhagan et al. 2020): words removed from screen / final words. */
+function normalizedErasure(displays: string[]) {
+  let erased = 0;
+  for (let i = 1; i < displays.length; i += 1) {
+    const prev = words(displays[i - 1]);
+    const next = words(displays[i]);
+    let lcp = 0;
+    while (lcp < prev.length && lcp < next.length && prev[lcp] === next[lcp]) lcp += 1;
+    erased += prev.length - lcp;
+  }
+  const final = words(displays.at(-1) ?? "").length || 1;
+  return erased / final;
+}
+
+/** Machine translation that keeps rewriting its tail, as re-translation does. */
+function noisyHypotheses(target: string[]) {
+  const out: string[] = [];
+  for (let n = 2; n <= target.length; n += 1) {
+    const prefix = target.slice(0, n);
+    if (n % 3 === 0 && n >= 4) {
+      // swap the last two words, then settle on the next update
+      const swapped = [...prefix.slice(0, -2), prefix.at(-1)!, prefix.at(-2)!];
+      out.push(swapped.join(" "));
+    }
+    if (n % 4 === 0) out.push([...prefix.slice(0, -1), "that"].join(" "));
+    out.push(prefix.join(" "));
+  }
+  return out;
+}
+
+function testStableTextMonotonic() {
+  console.log("\n[Fluency] stable live text: no rewrite of words already read");
+  const target = words("God loves the world so much that he gave his only son for all of us");
+  const stable = new StableText();
+  const raw: string[] = [];
+  const shown: string[] = [];
+  for (const h of noisyHypotheses(target)) {
+    raw.push(h);
+    shown.push(stable.update(h));
+  }
+  const rawNe = normalizedErasure(raw);
+  const ne = normalizedErasure(shown.filter(Boolean));
+  console.log(`    erasure raw=${rawNe.toFixed(2)} stabilized=${ne.toFixed(2)}`);
+  assert(rawNe > 0.2, "raw re-translation flickers (NE > 0.2) — the problem is real");
+  assert(ne < 0.2, "stabilized display stays under NE 0.2");
+  assertEq(stable.getStats().erased, 0, "no shown word was ever replaced in this run");
+  const last = shown.at(-1) ?? "";
+  assert(target.join(" ").startsWith(last), "shown text is always a prefix of the settled translation");
+  assert(words(last).length >= target.length - 1, "live line keeps up: at most one word behind");
+}
+
+function testStableTextHoldsOnDisagreement() {
+  console.log("\n[Fluency] big disagreement waits for the final instead of rewriting");
+  const stable = new StableText();
+  stable.update("The grace of God is enough");
+  const shown = stable.update("The grace of God is enough for");
+  assertEq(shown, "The grace of God is enough", "agreed prefix is shown");
+  stable.update("God's grace is sufficient for us");
+  const held = stable.update("God's grace is sufficient for us all");
+  assertEq(held, "The grace of God is enough", "reordered hypothesis does not erase the line");
+  stable.update("The grace of God is enough for us");
+  const tail = stable.update("The grace of God is enough for us all");
+  assertEq(tail, "The grace of God is enough for us", "line grows again once hypotheses agree");
+  const paused = stable.settle("The grace of God is enough for us all");
+  assertEq(paused, "The grace of God is enough for us all", "speaker paused: newest translation shown whole");
+}
+
+function testStableTextTailFix() {
+  console.log("\n[Fluency] small fix at the tail is allowed and counted");
+  const stable = new StableText();
+  stable.update("He said the");
+  stable.update("He said the");
+  const fixed = [stable.update("He said this word"), stable.update("He said this word today")].at(-1);
+  assertEq(fixed, "He said this word", "tail word corrected once the new reading agrees");
+  assertEq(stable.getStats().erased, 1, "one erased word recorded");
+}
+
+function testShapeGuardKeepsEveryWord() {
+  console.log("\n[Fluency] language-model polish may punctuate, never drop or swap words");
+  assert(sameWords("deus é fiel e justo", "Deus é fiel, e justo."), "punctuation and capitals only: accepted");
+  assert(!sameWords("deus é fiel e justo", "Deus é fiel."), "dropped words: rejected");
+  assert(!sameWords("deus é fiel e justo", "Deus é justo e fiel."), "reordered words: rejected");
+  assert(sameWords("خدا وفادار است", "خدا وفادار است."), "works for Persian script");
+}
+
+function testClauseSplitKeepsWords() {
+  console.log("\n[Fluency] long sentence closes at a clause break, nothing lost");
+  const tape = new SourceTape();
+  const stream = new WlkStream();
+  const sentence =
+    "Quando olhamos para a cruz e lembramos de tudo o que Jesus sofreu por nós naquele dia, " +
+    "entendemos que o amor de Deus não tem medida e que ele nos chama para viver uma vida nova " +
+    "cheia de esperança e de alegria verdadeira";
+  const w = words(sentence);
+  const frozen: string[] = [];
+  let t = 1_000;
+  for (let i = 1; i <= w.length; i += 1) {
+    const d = stream.next(frameOf([w.slice(0, Math.max(0, i - 2)).join(" ")].filter(Boolean), w.slice(Math.max(0, i - 2), i).join(" ")));
+    t += 200;
+    if (d) frozen.push(...tape.pushCommitted(d.committed, d.tip, t).frozen);
+  }
+  const d = stream.next(frameOf([`${sentence}.`], ""));
+  if (d) frozen.push(...tape.pushCommitted(d.committed, d.tip, t + 200).frozen);
+  frozen.push(...tape.flushAll().frozen);
+  assert(frozen.length >= 2, "the 45-word sentence became more than one block");
+  assert(frozen[0].endsWith(","), "first block ends at the clause comma");
+  assert(frozen.every((f) => words(f).length <= 30), "every block is at most 30 words");
+  assertEq(plainWords(frozen.join(" ")).join(" "), plainWords(sentence).join(" "), "all words kept, in order");
+  assertEq(finishSentence("naquele dia,"), "Naquele dia…", "clause block ends with an ellipsis");
+  assertEq(finishSentence("entendemos que", true), "entendemos que.", "continuation keeps its lowercase start");
+}
+
+async function testLiveEngineFluentDisplay() {
+  console.log("\n[LiveEngine] live line: listener language only, never rewrites what was read");
+  process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
+  const mock = installFetchMock();
+  clearLiveEngine("E2E-FLUENT");
+  clearSourceTape("E2E-FLUENT");
+  const lives: Caption[] = [];
+  const finals: Caption[] = [];
+  const engine = ensureLiveEngine("E2E-FLUENT", {
+    getSourceLang: () => "pt",
+    getTargets: () => ["en"],
+    onLive: (c) => lives.push({ ...c, translations: { ...c.translations } }),
+    onUpdate: () => undefined,
+    onFinal: (c) => finals.push({ ...c, translations: { ...c.translations } }),
+  });
+  const stream = new WlkStream();
+  const committed: string[] = [];
+  for (const sentence of SERMON.slice(0, 4)) {
+    const w = words(sentence);
+    for (let i = 1; i <= w.length; i += 1) {
+      const d = stream.next(frameOf(
+        [...committed, w.slice(0, Math.max(0, i - 2)).join(" ")].filter(Boolean),
+        w.slice(Math.max(0, i - 2), i).join(" "),
+      ));
+      if (d) engine.pushCommitted(d.committed, d.tip);
+      await sleep(260);
+    }
+    committed.push(`${sentence}.`);
+    const d = stream.next(frameOf(committed, ""));
+    if (d) engine.pushCommitted(d.committed, d.tip);
+    await sleep(400);
+  }
+  await sleep(1_200);
+
+  const byLine = new Map<string, string[]>();
+  for (const c of lives) {
+    const en = c.translations.en;
+    if (!en) continue;
+    const list = byLine.get(c.id) ?? [];
+    if (list.at(-1) !== en) list.push(en);
+    byLine.set(c.id, list);
+  }
+  assert(byLine.size >= 3, "live English shown for most sentences before they close");
+  const notEnglish = lives.filter((c) => c.translations.en && !c.translations.en.startsWith("EN:"));
+  assertEq(notEnglish.length, 0, "live English line never shows the Portuguese source");
+  let worst = 0;
+  for (const seq of byLine.values()) worst = Math.max(worst, normalizedErasure(seq));
+  assert(worst < 0.2, `worst live erasure ${worst.toFixed(2)} < 0.2`);
+  assertEq(finals.length, 4, "one final per sentence");
+  engine.clear();
+  mock.restore();
+}
+
+async function testLiveEngineNoisyMtStaysReadable() {
+  console.log("\n[LiveEngine] re-translation that keeps rewriting: display still stable");
+  process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
+  const mock = installFetchMock();
+  const inner = globalThis.fetch;
+  let calls = 0;
+  // Every other Riva answer swaps the last two words, like an unstable decoder.
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const res = await inner(input, init);
+    if (!url.includes("integrate.api.nvidia.com")) return res;
+    const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const w = data.choices[0].message.content.split(" ");
+    calls += 1;
+    if (calls % 2 === 0 && w.length >= 4) [w[w.length - 1], w[w.length - 2]] = [w[w.length - 2], w[w.length - 1]];
+    data.choices[0].message.content = w.join(" ");
+    return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  clearLiveEngine("E2E-NOISY");
+  clearSourceTape("E2E-NOISY");
+  const lives: Caption[] = [];
+  const engine = ensureLiveEngine("E2E-NOISY", {
+    getSourceLang: () => "pt",
+    getTargets: () => ["en"],
+    onLive: (c) => lives.push({ ...c, translations: { ...c.translations } }),
+    onUpdate: () => undefined,
+    onFinal: () => undefined,
+  });
+  const stream = new WlkStream();
+  const sentence = "Paulo escreveu aos romanos sobre a graça que nos alcança mesmo quando não merecemos nada";
+  const w = words(sentence);
+  for (let i = 1; i <= w.length; i += 1) {
+    const d = stream.next(frameOf([w.slice(0, Math.max(0, i - 2)).join(" ")].filter(Boolean), w.slice(Math.max(0, i - 2), i).join(" ")));
+    if (d) engine.pushCommitted(d.committed, d.tip);
+    await sleep(i === 8 ? 1_200 : 250); // a mid-sentence pause
+  }
+  await sleep(1_500);
+  const seq: string[] = [];
+  for (const c of lives) {
+    const en = c.translations.en;
+    if (en && seq.at(-1) !== en) seq.push(en);
+  }
+  const ne = normalizedErasure(seq);
+  console.log(`    live updates=${seq.length} erasure=${ne.toFixed(2)} last="${seq.at(-1)}"`);
+  assert(seq.length >= 3, "live line kept growing while he spoke");
+  assert(ne < 0.2, "erasure under 0.2 despite unstable translations");
+  assert(words(seq.at(-1) ?? "").length >= w.length - 3, "live line ends close to everything heard");
+  engine.clear();
+  globalThis.fetch = inner;
+  mock.restore();
+}
+
 async function testSocketCaptionFlow() {
   console.log("\n[Socket E2E] host transcript → listener caption:live / caption");
   process.env.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "nvapi-test-key";
@@ -931,6 +1153,11 @@ async function main() {
   testWlkSilenceFrozeTipBeforeCommit();
   testWlkTipRevisionSettles();
   testWlkServerHistoryRestart();
+  testStableTextMonotonic();
+  testStableTextHoldsOnDisagreement();
+  testStableTextTailFix();
+  testShapeGuardKeepsEveryWord();
+  testClauseSplitKeepsWords();
   testRivaLanguageMatrix();
   testCaptionUpsert();
 
@@ -940,6 +1167,8 @@ async function main() {
   await testLiveEngineMultiLangPivot();
   await testPreviousLinesFollowLanguage();
   await testLiveEngineWlkFinalsUnique();
+  await testLiveEngineFluentDisplay();
+  await testLiveEngineNoisyMtStaysReadable();
   await testSocketCaptionFlow();
 
   console.log("\n═══ Results ═══");
