@@ -226,18 +226,84 @@ const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
  */
 const NVIDIA_DEFAULT_MODEL = "stepfun-ai/step-5-preview";
 let nvidiaPausedUntil = 0;
-/** Serialize slow LLM jobs (summary / revision) — never on the live caption path. */
-let nvidiaTail: Promise<unknown> = Promise.resolve();
 /** Models that returned 404/410 — never retry until process restart. */
 const nvidiaDeadModels = new Set<string>();
 
-function enqueueNvidia<T>(fn: () => Promise<T>): Promise<T> {
-  const run = nvidiaTail.then(fn, fn);
-  nvidiaTail = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
+export type LlmPriority = "caption" | "background";
+
+/**
+ * Two-level priority queue. Caption tasks always start before pending
+ * background tasks; at most `maxCaption` caption + `maxBackground` background
+ * tasks run at once. A caption task that waited longer than `captionMaxWaitMs`
+ * is dropped (resolves null) — a stale polish no longer helps reading.
+ */
+export function createLlmQueue(opts?: {
+  maxCaption?: number;
+  maxBackground?: number;
+  captionMaxWaitMs?: number;
+  now?: () => number;
+}) {
+  const maxCaption = opts?.maxCaption ?? 1;
+  const maxBackground = opts?.maxBackground ?? 1;
+  const captionMaxWaitMs = opts?.captionMaxWaitMs ?? 4000;
+  const now = opts?.now ?? Date.now;
+  type Job = {
+    fn: () => Promise<unknown>;
+    at: number;
+    resolve: (v: unknown) => void;
+    reject: (e: unknown) => void;
+  };
+  const pending: Record<LlmPriority, Job[]> = { caption: [], background: [] };
+  const running: Record<LlmPriority, number> = { caption: 0, background: 0 };
+  const limit: Record<LlmPriority, number> = {
+    caption: maxCaption,
+    background: maxBackground,
+  };
+
+  function pump() {
+    for (const p of ["caption", "background"] as LlmPriority[]) {
+      while (running[p] < limit[p] && pending[p].length) {
+        const job = pending[p].shift()!;
+        if (p === "caption" && now() - job.at > captionMaxWaitMs) {
+          job.resolve(null);
+          continue;
+        }
+        running[p]++;
+        job.fn().then(job.resolve, job.reject).finally(() => {
+          running[p]--;
+          pump();
+        });
+      }
+    }
+  }
+
+  function enqueue<T>(priority: LlmPriority, fn: () => Promise<T>): Promise<T | null> {
+    return new Promise<T | null>((resolve, reject) => {
+      pending[priority].push({
+        fn,
+        at: now(),
+        resolve: resolve as (v: unknown) => void,
+        reject,
+      });
+      pump();
+    });
+  }
+  return {
+    enqueue,
+    stats: () => ({
+      pending: { caption: pending.caption.length, background: pending.background.length },
+      running: { ...running },
+    }),
+  };
+}
+
+const nvidiaQueue = createLlmQueue();
+
+function enqueueNvidia<T>(
+  fn: () => Promise<T>,
+  priority: LlmPriority = "background",
+): Promise<T | null> {
+  return nvidiaQueue.enqueue(priority, fn);
 }
 
 function pauseNvidia(reason: string, ms = 5 * 60_000) {
@@ -958,7 +1024,7 @@ export async function shapeSentencesWithLlm(input: {
       console.warn(`[translate] sentence shape skipped (${msg})`);
       return null;
     }
-  });
+  }, "caption");
 }
 
 /** Slow-path: revise one frozen caption with sermon memory (same id on client). */
