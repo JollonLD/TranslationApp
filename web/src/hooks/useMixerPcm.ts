@@ -1,4 +1,10 @@
 import { useRef, useState } from "react";
+import { createLevelClassifier, dbfs, measureBlock, type LevelStatus } from "../lib/audioLevel";
+
+export type MixerLevel = { peakDb: number; rmsDb: number; status: LevelStatus };
+
+const LEVEL_IDLE: MixerLevel = { peakDb: -90, rmsDb: -90, status: "ok" };
+const LEVEL_INTERVAL_MS = 100;
 
 const RAW_AUDIO = {
   echoCancellation: false,
@@ -39,6 +45,7 @@ type PcmHandlers = {
 export function useMixerPcm(handlers: PcmHandlers) {
   const [listening, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [level, setLevel] = useState<MixerLevel>(LEVEL_IDLE);
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const streamRef = useRef<MediaStream | null>(null);
@@ -63,9 +70,25 @@ export function useMixerPcm(handlers: PcmHandlers) {
       });
       source.connect(worklet);
       const rate = context.sampleRate;
+      const classifier = createLevelClassifier();
+      let accPeak = 0;
+      let accRms = 0;
+      let lastEmit = performance.now();
       worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
         const floats = event.data;
         if (!floats?.length) return;
+        const block = measureBlock(floats);
+        accPeak = Math.max(accPeak, block.peak);
+        accRms = Math.max(accRms, block.rms);
+        const now = performance.now();
+        if (now - lastEmit >= LEVEL_INTERVAL_MS) {
+          const peakDb = dbfs(accPeak);
+          const rmsDb = dbfs(accRms);
+          setLevel({ peakDb, rmsDb, status: classifier.push(peakDb, rmsDb, now) });
+          accPeak = 0;
+          accRms = 0;
+          lastEmit = now;
+        }
         handlersRef.current.onPcm(resampleToPcm(floats, rate));
       };
       streamRef.current = stream;
@@ -88,7 +111,8 @@ export function useMixerPcm(handlers: PcmHandlers) {
     for (const track of streamRef.current?.getTracks() ?? []) track.stop();
     streamRef.current = null;
     setListening(false);
+    setLevel(LEVEL_IDLE);
   }
 
-  return { listening, error, start, stop, supported: true };
+  return { listening, error, level, start, stop, supported: true };
 }
