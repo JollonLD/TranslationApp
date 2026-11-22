@@ -906,3 +906,139 @@ export function translateBibleBooks(text: string, target: LanguageCode) {
   }
   return result;
 }
+
+// —— Post-ASR correction (source side, before the tape is translated) ——
+
+/** Bible books Whisper often writes without accents or with a split word. */
+type Fix = [RegExp, string | ((match: string) => string)];
+
+/** Never lowercase what the speaker started with a capital. */
+function caseLike(source: string, to: string) {
+  return /^\p{Lu}/u.test(source) ? to.charAt(0).toLocaleUpperCase() + to.slice(1) : to;
+}
+
+function applyFixes(text: string, fixes: Fix[]) {
+  let out = text;
+  for (const [match, to] of fixes) {
+    out = out.replace(match, (m: string) => (typeof to === "string" ? caseLike(m, to) : to(m)));
+  }
+  return out;
+}
+
+const ASR_BOOKS: Fix[] = [
+  [/\bg[eê]nesis\b/gi, "Gênesis"],
+  [/\b[eê]xodo\b/gi, "Êxodo"],
+  [/\blev[ií]tico\b/gi, "Levítico"],
+  [/\bdeuteron[oô]mio\b/gi, "Deuteronômio"],
+  [/\bjosu[eé]\b/gi, "Josué"],
+  [/\bju[ií]zes\b(?=\s+\d)/gi, "Juízes"],
+  [/\bcr[oô]nicas\b/gi, "Crônicas"],
+  [/\bneemias\b/gi, "Neemias"],
+  [/\bprov[eé]rbios\b/gi, "Provérbios"],
+  [/\beclesiastes\b/gi, "Eclesiastes"],
+  [/\bisa[ií]as\b/gi, "Isaías"],
+  [/\blamenta[cç][oõ]es\b(?=\s+\d)/gi, "Lamentações"],
+  [/\bos[eé]ias\b/gi, "Oseias"],
+  [/\bobadias\b/gi, "Obadias"],
+  [/\bmiqu[eé]ias\b/gi, "Miqueias"],
+  [/\bhabacuque\b/gi, "Habacuque"],
+  [/\bsofonias\b/gi, "Sofonias"],
+  [/\bageu\b/gi, "Ageu"],
+  [/\bzacarias\b/gi, "Zacarias"],
+  [/\bmalaquias\b/gi, "Malaquias"],
+  [/\bmateus\b/gi, "Mateus"],
+  [/\bjo[aã]o\b/gi, "João"],
+  [/\batos\b(?=\s+\d)/gi, "Atos"],
+  [/\bromanos\b(?=\s+\d)/gi, "Romanos"],
+  [/\bcor[ií]ntios\b/gi, "Coríntios"],
+  [/\bg[aá]latas\b/gi, "Gálatas"],
+  [/\bef[eé]s+ios\b/gi, "Efésios"],
+  [/\bfilipen+s+es\b/gi, "Filipenses"],
+  [/\bcolossen+s+es\b/gi, "Colossenses"],
+  [/\btessalonicen+s+es\b/gi, "Tessalonicenses"],
+  [/\btim[oó]teo\b/gi, "Timóteo"],
+  [/\bfilemom\b/gi, "Filemom"],
+  [/\bhebreus\b(?=\s+\d)/gi, "Hebreus"],
+  [/\btiago\b(?=\s+\d)/gi, "Tiago"],
+  [/\bapocalipse\b/gi, "Apocalipse"],
+  [/\bsalmos?\b(?=\s+\d)/gi, (m) => `S${m.slice(1).toLowerCase()}`],
+];
+
+/** Split or garbled church words that keep coming back in ASR logs. */
+const ASR_PHRASES: Fix[] = [
+  [/\ba\s+leluia\b/gi, "aleluia"],
+  [/\bal[ée]luia\b/gi, "aleluia"],
+  [/\ba\s+mém\b/gi, "amém"],
+  // "amem" is also the verb ("amem uns aos outros"): only fix it when said alone.
+  [/^\s*amem(?=[\s.!…]*$)/i, "amém"],
+  [/\bo\s+sana\b/gi, "hosana"],
+  [/\bosana\b/gi, "hosana"],
+  [/\besp[ií]rito\s+santo\b/gi, "Espírito Santo"],
+  [/\bjesus\s+cristo\b/gi, "Jesus Cristo"],
+  [/\bsanta\s+ceia\b/gi, "Santa Ceia"],
+  [/\bcap[ií]tulo\b/gi, "capítulo"],
+  [/\bvers[ií]culos\b/gi, "versículos"],
+  [/\bvers[ií]culo\b/gi, "versículo"],
+];
+
+const UNITS: Record<string, number> = {
+  um: 1, uma: 1, dois: 2, duas: 2, "três": 3, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7,
+  oito: 8, nove: 9, dez: 10, onze: 11, doze: 12, treze: 13, catorze: 14, quatorze: 14,
+  quinze: 15, dezesseis: 16, dezessete: 17, dezoito: 18, dezenove: 19,
+};
+const TENS: Record<string, number> = {
+  vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50, sessenta: 60, setenta: 70, oitenta: 80, noventa: 90,
+};
+const NUMBER_WORD = `(?:cento|cem|${Object.keys(TENS).join("|")}|${Object.keys(UNITS).join("|")})`;
+const NUMBER_PHRASE = new RegExp(`${NUMBER_WORD}(?:\\s+e\\s+${NUMBER_WORD})*`, "i");
+
+/** "cento e dezenove" → 119; null when the words are not one number. */
+export function parsePtNumber(words: string): number | null {
+  const parts = words.toLowerCase().split(/\s+e\s+/);
+  let total = 0;
+  let lastScale = Infinity;
+  for (const part of parts) {
+    let value: number;
+    if (part === "cem" || part === "cento") value = 100;
+    else if (part in TENS) value = TENS[part];
+    else if (part in UNITS) value = UNITS[part];
+    else return null;
+    const scale = value >= 100 ? 100 : value >= 20 ? 10 : 1;
+    if (scale >= lastScale) return null; // "vinte e trinta" is not one number
+    lastScale = scale;
+    total += value;
+  }
+  return total;
+}
+
+/** Spoken numbers become digits only after a scripture cue, so "um amor" stays a word. */
+const BOOK_CUES = [
+  ...new Set(ASR_BOOKS.map(([, to]) => to).filter((to): to is string => typeof to === "string")),
+  "Lucas", "Marcos", "Rute", "Ester", "Jó", "Daniel", "Jonas", "Naum", "Joel", "Amós",
+  "Samuel", "Reis", "Pedro", "Judas", "Ezequiel", "Jeremias", "Números", "Cantares", "Esdras", "Tito",
+].join("|");
+// A book name alone is not enough ("Judas trinta moedas"): it needs a chapter in
+// digits after it, or a numbered book ("2 Pedro"). Chapter/verse words always count.
+const CUE = String.raw`(?:[Cc]ap[ií]tulo|[Vv]ers[ií]culos?|[Vv]erso|[Ss]almos?|(?:${BOOK_CUES})\s+\d{1,3}|[123]\s*(?:${BOOK_CUES}))`;
+const CUE_NUMBER = new RegExp(String.raw`\b(${CUE})\s+(${NUMBER_PHRASE.source})\b`, "g");
+
+/**
+ * Fix what the ASR got wrong on church vocabulary before the line is shown or
+ * translated. Conservative: only accents, split words and verse numbers.
+ */
+export function correctAsrTerms(text: string, source: LanguageCode) {
+  if (source !== "pt" || !text.trim()) return text;
+  let out = applyFixes(text, ASR_PHRASES);
+  out = applyFixes(out, ASR_BOOKS);
+  // "capítulo três versículo dezesseis" → "capítulo 3 versículo 16"
+  for (let i = 0; i < 3; i += 1) {
+    const next = out.replace(CUE_NUMBER, (whole, cue: string, spoken: string) => {
+      const n = parsePtNumber(spoken);
+      if (n === null) return whole;
+      return `${/^salmos?$/i.test(cue) ? `S${cue.slice(1)}` : cue} ${n}`;
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}

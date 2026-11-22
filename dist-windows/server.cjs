@@ -55429,6 +55429,70 @@ function localHostname() {
   return (0, import_node_os.hostname)();
 }
 
+// server/src/asrFilter.ts
+function norm(text) {
+  return text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+var PT_PATTERNS = [
+  /^(muito )?obrigad[oa]( a todos| pessoal)?( por assistir| por assistirem| por ter assistido| pela atencao| pela audiencia)$/,
+  /^obrigad[oa] por (assistir|assistirem)( este| esse| o)?( video)?$/,
+  /^legendas? (pela|da|por) comunidade amara org$/,
+  /^legendas? pela comunidade$/,
+  /^legendad[oa] por .+$/,
+  /^traduzid[oa] por .+$/,
+  /^inscreva se( no canal| no meu canal)?( e ative o sino)?$/,
+  /^se inscreva( no canal)?$/,
+  /^deixe o seu like.*$/,
+  /^(tchau )+tchau$/,
+  /^ate (a )?proxima( video)?$/,
+  /^ate o proximo video$/
+];
+var EN_PATTERNS = [
+  /^thanks? for watching( this video)?$/,
+  /^thank you for watching( this video)?$/,
+  /^thank you( very much| so much)?$/,
+  /^subtitles? by .+$/,
+  /^please subscribe( to (the|my) channel)?$/,
+  /^subscribe to (the|my) channel$/,
+  /^bye( bye)+$/
+];
+var PATTERNS = { pt: PT_PATTERNS, en: EN_PATTERNS };
+var LITURGICAL = /* @__PURE__ */ new Set(["aleluia", "amem", "santo", "santa", "gloria", "hosana", "digno", "jesus", "senhor", "aleluya", "amen", "holy"]);
+var LOOP_WORD_RUN = 8;
+var LOOP_CHUNK_RUN = 6;
+function isHallucination(sentence, lang = "pt") {
+  const raw = sentence.trim();
+  if (!raw) return false;
+  if (/^[\[(][^\])]*[\])][.!…]*$/.test(raw)) return true;
+  const n = norm(raw.replace(/[♪♫♬]/g, " "));
+  if (!n) return true;
+  if ((PATTERNS[lang] ?? []).some((re) => re.test(n))) return true;
+  const words = n.split(" ");
+  if (words.length >= LOOP_WORD_RUN * 2 && new Set(words).size === 1 && !LITURGICAL.has(words[0])) return true;
+  return false;
+}
+function keepThree(run, unit, sep) {
+  return [unit, unit, unit].join(sep);
+}
+function stripRepeats(text) {
+  let out = text;
+  out = out.replace(
+    new RegExp(String.raw`(?<![\p{L}\p{N}])([\p{L}\p{N}']+)((?:[\s,.;:!?…-]+)\1(?![\p{L}\p{N}'])){${LOOP_WORD_RUN - 1},}`, "giu"),
+    (run, word, last) => {
+      const sep = last.slice(0, last.length - word.length) || " ";
+      return keepThree(run, word, sep);
+    }
+  );
+  out = out.replace(
+    new RegExp(String.raw`((?:[\p{L}\p{N}']+[\s,.;:!?…-]+){1,7}[\p{L}\p{N}']+)((?:[\s,.;:!?…-]+)\1(?![\p{L}\p{N}'])){${LOOP_CHUNK_RUN - 1},}`, "giu"),
+    (run, chunk, last) => {
+      const sep = last.slice(0, last.length - chunk.length) || " ";
+      return keepThree(run, chunk, sep);
+    }
+  );
+  return out === text ? text : out.replace(/\s{2,}/g, " ").trim();
+}
+
 // server/src/churchGlossary.ts
 var PHRASE_GLOSSARY = [
   // —— Scripture & books ——
@@ -56276,6 +56340,163 @@ function prepareChurchSource(text, source) {
   );
   return out;
 }
+function caseLike(source, to) {
+  return /^\p{Lu}/u.test(source) ? to.charAt(0).toLocaleUpperCase() + to.slice(1) : to;
+}
+function applyFixes(text, fixes) {
+  let out = text;
+  for (const [match, to] of fixes) {
+    out = out.replace(match, (m) => typeof to === "string" ? caseLike(m, to) : to(m));
+  }
+  return out;
+}
+var ASR_BOOKS = [
+  [/\bg[eê]nesis\b/gi, "G\xEAnesis"],
+  [/\b[eê]xodo\b/gi, "\xCAxodo"],
+  [/\blev[ií]tico\b/gi, "Lev\xEDtico"],
+  [/\bdeuteron[oô]mio\b/gi, "Deuteron\xF4mio"],
+  [/\bjosu[eé]\b/gi, "Josu\xE9"],
+  [/\bju[ií]zes\b(?=\s+\d)/gi, "Ju\xEDzes"],
+  [/\bcr[oô]nicas\b/gi, "Cr\xF4nicas"],
+  [/\bneemias\b/gi, "Neemias"],
+  [/\bprov[eé]rbios\b/gi, "Prov\xE9rbios"],
+  [/\beclesiastes\b/gi, "Eclesiastes"],
+  [/\bisa[ií]as\b/gi, "Isa\xEDas"],
+  [/\blamenta[cç][oõ]es\b(?=\s+\d)/gi, "Lamenta\xE7\xF5es"],
+  [/\bos[eé]ias\b/gi, "Oseias"],
+  [/\bobadias\b/gi, "Obadias"],
+  [/\bmiqu[eé]ias\b/gi, "Miqueias"],
+  [/\bhabacuque\b/gi, "Habacuque"],
+  [/\bsofonias\b/gi, "Sofonias"],
+  [/\bageu\b/gi, "Ageu"],
+  [/\bzacarias\b/gi, "Zacarias"],
+  [/\bmalaquias\b/gi, "Malaquias"],
+  [/\bmateus\b/gi, "Mateus"],
+  [/\bjo[aã]o\b/gi, "Jo\xE3o"],
+  [/\batos\b(?=\s+\d)/gi, "Atos"],
+  [/\bromanos\b(?=\s+\d)/gi, "Romanos"],
+  [/\bcor[ií]ntios\b/gi, "Cor\xEDntios"],
+  [/\bg[aá]latas\b/gi, "G\xE1latas"],
+  [/\bef[eé]s+ios\b/gi, "Ef\xE9sios"],
+  [/\bfilipen+s+es\b/gi, "Filipenses"],
+  [/\bcolossen+s+es\b/gi, "Colossenses"],
+  [/\btessalonicen+s+es\b/gi, "Tessalonicenses"],
+  [/\btim[oó]teo\b/gi, "Tim\xF3teo"],
+  [/\bfilemom\b/gi, "Filemom"],
+  [/\bhebreus\b(?=\s+\d)/gi, "Hebreus"],
+  [/\btiago\b(?=\s+\d)/gi, "Tiago"],
+  [/\bapocalipse\b/gi, "Apocalipse"],
+  [/\bsalmos?\b(?=\s+\d)/gi, (m) => `S${m.slice(1).toLowerCase()}`]
+];
+var ASR_PHRASES = [
+  [/\ba\s+leluia\b/gi, "aleluia"],
+  [/\bal[ée]luia\b/gi, "aleluia"],
+  [/\ba\s+mém\b/gi, "am\xE9m"],
+  // "amem" is also the verb ("amem uns aos outros"): only fix it when said alone.
+  [/^\s*amem(?=[\s.!…]*$)/i, "am\xE9m"],
+  [/\bo\s+sana\b/gi, "hosana"],
+  [/\bosana\b/gi, "hosana"],
+  [/\besp[ií]rito\s+santo\b/gi, "Esp\xEDrito Santo"],
+  [/\bjesus\s+cristo\b/gi, "Jesus Cristo"],
+  [/\bsanta\s+ceia\b/gi, "Santa Ceia"],
+  [/\bcap[ií]tulo\b/gi, "cap\xEDtulo"],
+  [/\bvers[ií]culos\b/gi, "vers\xEDculos"],
+  [/\bvers[ií]culo\b/gi, "vers\xEDculo"]
+];
+var UNITS = {
+  um: 1,
+  uma: 1,
+  dois: 2,
+  duas: 2,
+  "tr\xEAs": 3,
+  tres: 3,
+  quatro: 4,
+  cinco: 5,
+  seis: 6,
+  sete: 7,
+  oito: 8,
+  nove: 9,
+  dez: 10,
+  onze: 11,
+  doze: 12,
+  treze: 13,
+  catorze: 14,
+  quatorze: 14,
+  quinze: 15,
+  dezesseis: 16,
+  dezessete: 17,
+  dezoito: 18,
+  dezenove: 19
+};
+var TENS = {
+  vinte: 20,
+  trinta: 30,
+  quarenta: 40,
+  cinquenta: 50,
+  sessenta: 60,
+  setenta: 70,
+  oitenta: 80,
+  noventa: 90
+};
+var NUMBER_WORD = `(?:cento|cem|${Object.keys(TENS).join("|")}|${Object.keys(UNITS).join("|")})`;
+var NUMBER_PHRASE = new RegExp(`${NUMBER_WORD}(?:\\s+e\\s+${NUMBER_WORD})*`, "i");
+function parsePtNumber(words) {
+  const parts = words.toLowerCase().split(/\s+e\s+/);
+  let total = 0;
+  let lastScale = Infinity;
+  for (const part of parts) {
+    let value;
+    if (part === "cem" || part === "cento") value = 100;
+    else if (part in TENS) value = TENS[part];
+    else if (part in UNITS) value = UNITS[part];
+    else return null;
+    const scale = value >= 100 ? 100 : value >= 20 ? 10 : 1;
+    if (scale >= lastScale) return null;
+    lastScale = scale;
+    total += value;
+  }
+  return total;
+}
+var BOOK_CUES = [
+  ...new Set(ASR_BOOKS.map(([, to]) => to).filter((to) => typeof to === "string")),
+  "Lucas",
+  "Marcos",
+  "Rute",
+  "Ester",
+  "J\xF3",
+  "Daniel",
+  "Jonas",
+  "Naum",
+  "Joel",
+  "Am\xF3s",
+  "Samuel",
+  "Reis",
+  "Pedro",
+  "Judas",
+  "Ezequiel",
+  "Jeremias",
+  "N\xFAmeros",
+  "Cantares",
+  "Esdras",
+  "Tito"
+].join("|");
+var CUE = String.raw`(?:[Cc]ap[ií]tulo|[Vv]ers[ií]culos?|[Vv]erso|[Ss]almos?|(?:${BOOK_CUES})\s+\d{1,3}|[123]\s*(?:${BOOK_CUES}))`;
+var CUE_NUMBER = new RegExp(String.raw`\b(${CUE})\s+(${NUMBER_PHRASE.source})\b`, "g");
+function correctAsrTerms(text, source) {
+  if (source !== "pt" || !text.trim()) return text;
+  let out = applyFixes(text, ASR_PHRASES);
+  out = applyFixes(out, ASR_BOOKS);
+  for (let i = 0; i < 3; i += 1) {
+    const next = out.replace(CUE_NUMBER, (whole, cue, spoken) => {
+      const n = parsePtNumber(spoken);
+      if (n === null) return whole;
+      return `${/^salmos?$/i.test(cue) ? `S${cue.slice(1)}` : cue} ${n}`;
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
 
 // server/src/bibleRefs.ts
 var BOOK_MAP = [
@@ -56523,6 +56744,10 @@ function rivaCanPivot(source, target) {
   if ((source === "es" || source === "it") && target === "pt") return true;
   return false;
 }
+function rivaMaxTokens(text) {
+  const est = Math.ceil(text.slice(0, 3500).length / 3);
+  return Math.min(512, Math.max(32, Math.ceil(est * 2.5) + 16));
+}
 async function rivaOnce(pair, text, signal) {
   const key2 = apiKey();
   if (!key2 || rivaDead || Date.now() < rivaPausedUntil) {
@@ -56541,9 +56766,9 @@ async function rivaOnce(pair, text, signal) {
         { role: "system", content: pair },
         { role: "user", content: text.slice(0, 3500) }
       ],
-      temperature: 0.1,
+      temperature: 0,
       top_p: 0.9,
-      max_tokens: 512,
+      max_tokens: rivaMaxTokens(text),
       stream: false
     }),
     signal: signal ?? AbortSignal.timeout(12e3)
@@ -57226,15 +57451,56 @@ var LANG_NAME = {
 var NVIDIA_URL3 = "https://integrate.api.nvidia.com/v1/chat/completions";
 var NVIDIA_DEFAULT_MODEL = "stepfun-ai/step-5-preview";
 var nvidiaPausedUntil = 0;
-var nvidiaTail = Promise.resolve();
 var nvidiaDeadModels = /* @__PURE__ */ new Set();
-function enqueueNvidia(fn) {
-  const run = nvidiaTail.then(fn, fn);
-  nvidiaTail = run.then(
-    () => void 0,
-    () => void 0
-  );
-  return run;
+function createLlmQueue(opts) {
+  const maxCaption = opts?.maxCaption ?? 1;
+  const maxBackground = opts?.maxBackground ?? 1;
+  const captionMaxWaitMs = opts?.captionMaxWaitMs ?? 4e3;
+  const now = opts?.now ?? Date.now;
+  const pending2 = { caption: [], background: [] };
+  const running = { caption: 0, background: 0 };
+  const limit = {
+    caption: maxCaption,
+    background: maxBackground
+  };
+  function pump() {
+    for (const p of ["caption", "background"]) {
+      while (running[p] < limit[p] && pending2[p].length) {
+        const job = pending2[p].shift();
+        if (p === "caption" && now() - job.at > captionMaxWaitMs) {
+          job.resolve(null);
+          continue;
+        }
+        running[p]++;
+        job.fn().then(job.resolve, job.reject).finally(() => {
+          running[p]--;
+          pump();
+        });
+      }
+    }
+  }
+  function enqueue(priority, fn) {
+    return new Promise((resolve, reject) => {
+      pending2[priority].push({
+        fn,
+        at: now(),
+        resolve,
+        reject
+      });
+      pump();
+    });
+  }
+  return {
+    enqueue,
+    stats: () => ({
+      pending: { caption: pending2.caption.length, background: pending2.background.length },
+      running: { ...running }
+    })
+  };
+}
+var nvidiaQueue = createLlmQueue();
+function enqueueNvidia(fn, priority = "background") {
+  return nvidiaQueue.enqueue(priority, fn);
 }
 function pauseNvidia(reason, ms = 5 * 6e4) {
   const already = Date.now() < nvidiaPausedUntil;
@@ -57670,7 +57936,7 @@ ${message.reasoning_content ?? ""}`;
       console.warn(`[translate] sentence shape skipped (${msg})`);
       return null;
     }
-  });
+  }, "caption");
 }
 async function translateText(text, source, target, options = {}) {
   const trimmed = text.trim();
@@ -57717,8 +57983,8 @@ async function translateMany(text, source, targets, options = {}) {
 
 // server/src/liveEngine.ts
 function sameWords(a, b) {
-  const norm = (t) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}\s]+/gu, " ").split(/\s+/).filter(Boolean).join(" ");
-  return norm(a) === norm(b);
+  const norm2 = (t) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}\s]+/gu, " ").split(/\s+/).filter(Boolean).join(" ");
+  return norm2(a) === norm2(b);
 }
 var SETTLE_MS = 450;
 function makeId(prefix) {
@@ -57828,12 +58094,17 @@ var LiveEngine = class {
     for (const phrase of snap.frozen) {
       void this.freezePhrase(phrase);
     }
+    if (snap.open.trim() && isHallucination(snap.open, this.hooks.getSourceLang())) {
+      return;
+    }
     if (snap.open.trim()) {
-      this.liveOriginal = snap.open;
+      const lang = this.hooks.getSourceLang();
+      const open = correctAsrTerms(stripRepeats(snap.open), lang);
+      this.liveOriginal = open;
       if (snap.openChanged || !this.liveId) {
         if (!this.liveId) this.liveId = makeId(`live-${this.code}`);
-        this.emitLiveShell(snap.open);
-        this.scheduleTranslate(snap.openStable || snap.open, false);
+        this.emitLiveShell(open);
+        this.scheduleTranslate(snap.openStable ? correctAsrTerms(stripRepeats(snap.openStable), lang) : open, false);
       }
     } else if (snap.frozeOpen) {
       this.liveOriginal = "";
@@ -58031,7 +58302,11 @@ var LiveEngine = class {
     this.hooks.onLive(caption);
   }
   async freezePhrase(phrase) {
-    const raw = phrase.trim();
+    const raw = correctAsrTerms(stripRepeats(phrase.trim()), this.hooks.getSourceLang());
+    if (isHallucination(raw, this.hooks.getSourceLang())) {
+      writeLog(`[descartado] ${phrase.trim().slice(0, 120)}`);
+      return;
+    }
     const original = finishSentence(raw, this.clauseOpen);
     if (!original) return;
     this.clauseOpen = /[,;:]$/.test(raw);
@@ -58350,6 +58625,7 @@ function endSpace(code) {
 var import_node_child_process4 = require("node:child_process");
 var import_node_fs4 = require("node:fs");
 var import_node_path4 = __toESM(require("node:path"), 1);
+var DEFAULT_INIT_PROMPT = "Culto crist\xE3o. Jesus Cristo, Esp\xEDrito Santo, Deus Pai, aleluia, am\xE9m, santifica\xE7\xE3o, salva\xE7\xE3o, gra\xE7a, Evangelho, G\xEAnesis, \xCAxodo, Salmos, Prov\xE9rbios, Isa\xEDas, Mateus, Marcos, Lucas, Jo\xE3o, Atos, Romanos, Cor\xEDntios, G\xE1latas, Ef\xE9sios, Apocalipse.";
 var state = {
   mode: "webspeech",
   ready: false,
@@ -58434,6 +58710,8 @@ async function boot() {
     "--pause-segmentation-seconds",
     process.env.WLK_PAUSE_SECONDS?.trim() || "1.2"
   ];
+  const initPrompt = process.env.WLK_INIT_PROMPT ?? DEFAULT_INIT_PROMPT;
+  if (initPrompt.trim()) args.push("--static-init-prompt", initPrompt.trim());
   writeLog(`starting WhisperLiveKit: ${bin} ${[...launch, ...args].join(" ")}`);
   child2 = (0, import_node_child_process4.spawn)(bin, [...launch, ...args], {
     stdio: ["ignore", "pipe", "pipe"],

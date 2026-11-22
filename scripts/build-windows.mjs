@@ -101,7 +101,7 @@ run(
 // WhisperLiveKit depends on torch, but the CPU build is versioned 2.x+cpu,
 // which pip treats as older than 2.x and would replace with the CUDA wheel.
 run(
-  `"${pip}" ${pipTarget.join(" ")} --no-deps whisperlivekit`,
+  `"${pip}" ${pipTarget.join(" ")} --no-deps whisperlivekit==0.2.26`,
 );
 run(
   `"${pip}" ${pipTarget.join(" ")} fastapi uvicorn websockets huggingface-hub faster-whisper tqdm tiktoken python-multipart starlette librosa soundfile "transformers>=4.46" sentencepiece protobuf safetensors`,

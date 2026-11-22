@@ -2,13 +2,14 @@
  * Simultaneous caption engine: re-translate the open line, freeze on silence/sentence,
  * one in-flight request per language (cancel stale), LLM revise off the hot path.
  */
+import { isHallucination, stripRepeats } from "./asrFilter.js";
 import {
   detectBibleRefs,
   fetchCanonicalVerse,
   looksLikeVerseReading,
 } from "./bibleRefs.js";
 import { writeLog } from "./boot.js";
-import { polishChurchTerms } from "./churchGlossary.js";
+import { correctAsrTerms, polishChurchTerms } from "./churchGlossary.js";
 import { translateNllb } from "./nllbTranslate.js";
 import { rivaCanPivot, translateRiva } from "./rivaTranslate.js";
 import { clearSermonCard, refreshSermonCard } from "./sermonMemory.js";
@@ -190,12 +191,18 @@ export class LiveEngine {
       void this.freezePhrase(phrase);
     }
 
+    if (snap.open.trim() && isHallucination(snap.open, this.hooks.getSourceLang())) {
+      return; // never show hallucinated text on the live line
+    }
     if (snap.open.trim()) {
-      this.liveOriginal = snap.open;
+      // Church vocabulary fixed once, so the source shown and translated agree.
+      const lang = this.hooks.getSourceLang();
+      const open = correctAsrTerms(stripRepeats(snap.open), lang);
+      this.liveOriginal = open;
       if (snap.openChanged || !this.liveId) {
         if (!this.liveId) this.liveId = makeId(`live-${this.code}`);
-        this.emitLiveShell(snap.open);
-        this.scheduleTranslate(snap.openStable || snap.open, false);
+        this.emitLiveShell(open);
+        this.scheduleTranslate(snap.openStable ? correctAsrTerms(stripRepeats(snap.openStable), lang) : open, false);
       }
     } else if (snap.frozeOpen) {
       this.liveOriginal = "";
@@ -439,7 +446,11 @@ export class LiveEngine {
   }
 
   private async freezePhrase(phrase: string) {
-    const raw = phrase.trim();
+    const raw = correctAsrTerms(stripRepeats(phrase.trim()), this.hooks.getSourceLang());
+    if (isHallucination(raw, this.hooks.getSourceLang())) {
+      writeLog(`[descartado] ${phrase.trim().slice(0, 120)}`);
+      return;
+    }
     const original = finishSentence(raw, this.clauseOpen);
     if (!original) return;
     this.clauseOpen = /[,;:]$/.test(raw);

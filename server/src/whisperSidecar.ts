@@ -8,6 +8,10 @@ import path from "node:path";
 import { writeLog } from "./boot.js";
 import { resolveTool } from "./paths.js";
 
+/** Church vocabulary biasing Whisper (WLK --static-init-prompt). Override via WLK_INIT_PROMPT; empty disables. */
+export const DEFAULT_INIT_PROMPT =
+  "Culto cristão. Jesus Cristo, Espírito Santo, Deus Pai, aleluia, amém, santificação, salvação, graça, Evangelho, Gênesis, Êxodo, Salmos, Provérbios, Isaías, Mateus, Marcos, Lucas, João, Atos, Romanos, Coríntios, Gálatas, Efésios, Apocalipse.";
+
 export type AsrMode = "whisperlivekit" | "webspeech";
 
 type SidecarState = {
@@ -117,6 +121,9 @@ async function boot(): Promise<SidecarState> {
     "--pause-segmentation-seconds",
     process.env.WLK_PAUSE_SECONDS?.trim() || "1.2",
   ];
+
+  const initPrompt = process.env.WLK_INIT_PROMPT ?? DEFAULT_INIT_PROMPT;
+  if (initPrompt.trim()) args.push("--static-init-prompt", initPrompt.trim());
 
   writeLog(`starting WhisperLiveKit: ${bin} ${[...launch, ...args].join(" ")}`);
   child = spawn(bin, [...launch, ...args], {

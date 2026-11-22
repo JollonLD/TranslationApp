@@ -48,6 +48,12 @@ export function rivaCanPivot(source: LanguageCode, target: LanguageCode) {
   return false;
 }
 
+/** max_tokens proportional to the sentence: clamp(ceil(est * 2.5) + 16, 32, 512). */
+export function rivaMaxTokens(text: string): number {
+  const est = Math.ceil(text.slice(0, 3500).length / 3);
+  return Math.min(512, Math.max(32, Math.ceil(est * 2.5) + 16));
+}
+
 type RivaResult = { text: string | null; status: number };
 
 async function rivaOnce(
@@ -73,9 +79,9 @@ async function rivaOnce(
         { role: "system", content: pair },
         { role: "user", content: text.slice(0, 3500) },
       ],
-      temperature: 0.1,
+      temperature: 0,
       top_p: 0.9,
-      max_tokens: 512,
+      max_tokens: rivaMaxTokens(text),
       stream: false,
     }),
     signal: signal ?? AbortSignal.timeout(12_000),
