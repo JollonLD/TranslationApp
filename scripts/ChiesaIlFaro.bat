@@ -14,6 +14,9 @@ if exist "python\python.exe" (
   set "WLK_MODEL=small"
   set "WLK_LANGUAGE=pt"
   set "WLK_PORT=8000"
+  rem Optional: WLK_MODEL=medium or large-v3-turbo (download the model first; drop HF_HUB_OFFLINE)
+  rem Optional: WLK_PAUSE_SECONDS=1.2 (silence that closes a sentence)
+  rem Optional: WLK_INIT_PROMPT=vocabulary hint for Whisper (default: church terms; empty disables)
   set "NLLB_ENABLED=1"
   set "NLLB_PYTHON=%~dp0python\python.exe"
   set "NLLB_MODEL=%~dp0models\nllb"

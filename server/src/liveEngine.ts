@@ -2,6 +2,7 @@
  * Simultaneous caption engine: re-translate the open line, freeze on silence/sentence,
  * one in-flight request per language (cancel stale), LLM revise off the hot path.
  */
+import { isHallucination, stripRepeats } from "./asrFilter.js";
 import {
   detectBibleRefs,
   fetchCanonicalVerse,
@@ -190,6 +191,9 @@ export class LiveEngine {
       void this.freezePhrase(phrase);
     }
 
+    if (snap.open.trim() && isHallucination(snap.open, this.hooks.getSourceLang())) {
+      return; // never show hallucinated text on the live line
+    }
     if (snap.open.trim()) {
       this.liveOriginal = snap.open;
       if (snap.openChanged || !this.liveId) {
@@ -439,7 +443,11 @@ export class LiveEngine {
   }
 
   private async freezePhrase(phrase: string) {
-    const raw = phrase.trim();
+    const raw = stripRepeats(phrase.trim());
+    if (isHallucination(raw, this.hooks.getSourceLang())) {
+      writeLog(`[descartado] ${phrase.trim().slice(0, 120)}`);
+      return;
+    }
     const original = finishSentence(raw, this.clauseOpen);
     if (!original) return;
     this.clauseOpen = /[,;:]$/.test(raw);
